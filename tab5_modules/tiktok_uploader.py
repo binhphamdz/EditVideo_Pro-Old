@@ -1,11 +1,12 @@
 """
 🎬 TikTok Auto Uploader - Upload video tự động lên TikTok bằng Selenium
-Hỗ trợ: Batch upload, hashtag tự động, delay chống spam
+Hỗ trợ: Batch upload, hashtag tự động, delay chống spam, lưu cookies
 """
 
 import os
 import time
 import threading
+import json
 from datetime import datetime
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -13,19 +14,25 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
 import random
 
 
 class TikTokUploader:
-    def __init__(self, callback_log=None):
+    def __init__(self, callback_log=None, profile_name="tiktok_profile"):
         """
         Args:
             callback_log: Function để log messages. Signature: callback_log(msg)
+            profile_name: Tên profile Chrome để lưu cookies (default: tiktok_profile)
         """
         self.driver = None
         self.callback_log = callback_log or print
         self.is_logged_in = False
         self.uploading = False
+        self.profile_name = profile_name
+        self.profile_path = os.path.join(os.path.expanduser("~"), ".tiktok_profiles", profile_name)
+        self.cookies_file = os.path.join(self.profile_path, "cookies.json")
 
     def log(self, msg):
         """Log message với timestamp"""
@@ -33,11 +40,17 @@ class TikTokUploader:
         self.callback_log(f"[{ts}] {msg}")
 
     def init_driver(self, headless=False):
-        """Khởi tạo Selenium Chrome driver"""
+        """Khởi tạo Selenium Chrome driver với persistent profile"""
         try:
             options = Options()
+            
+            # Tạo profile để lưu cookies & data
+            os.makedirs(self.profile_path, exist_ok=True)
+            options.add_argument(f"user-data-dir={self.profile_path}")
+            
             if headless:
                 options.add_argument("--headless")
+            
             options.add_argument("--no-sandbox")
             options.add_argument("--disable-dev-shm-usage")
             options.add_argument("--disable-blink-features=AutomationControlled")
@@ -47,32 +60,104 @@ class TikTokUploader:
                 "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
             )
 
-            self.driver = webdriver.Chrome(options=options)
+            # Use webdriver-manager để auto-download ChromeDriver matching version
+            service = Service(ChromeDriverManager().install())
+            self.driver = webdriver.Chrome(service=service, options=options)
             self.log("✅ Chrome driver khởi tạo thành công")
             return True
         except Exception as e:
             self.log(f"❌ Lỗi khởi tạo Chrome: {e}")
             return False
 
-    def login(self, wait_manual=True):
+    def save_cookies(self):
+        """Lưu cookies từ browser"""
+        try:
+            os.makedirs(self.profile_path, exist_ok=True)
+            cookies = self.driver.get_cookies()
+            with open(self.cookies_file, 'w') as f:
+                json.dump(cookies, f, indent=2)
+            self.log(f"💾 Đã lưu cookies vào {self.cookies_file}")
+        except Exception as e:
+            self.log(f"⚠️ Lỗi lưu cookies: {e}")
+
+    def load_cookies(self):
+        """Load cookies từ file"""
+        try:
+            if not os.path.exists(self.cookies_file):
+                self.log("⚠️ Chưa có cookies lưu sẵn, sẽ phải login lại")
+                return False
+            
+            self.driver.get("https://www.tiktok.com")
+            time.sleep(2)
+            
+            with open(self.cookies_file, 'r') as f:
+                cookies = json.load(f)
+            
+            for cookie in cookies:
+                try:
+                    # Remove attributes that can't be set
+                    if 'expiry' in cookie:
+                        del cookie['expiry']
+                    self.driver.add_cookie(cookie)
+                except Exception as e:
+                    pass  # Skip cookies that can't be added
+            
+            self.log("✅ Đã load cookies từ file")
+            time.sleep(2)
+            self.driver.refresh()
+            return True
+        except Exception as e:
+            self.log(f"⚠️ Lỗi load cookies: {e}")
+            return False
+
+    def is_already_logged_in(self):
+        """Kiểm tra xem đã login hay chưa"""
+        try:
+            self.driver.get("https://www.tiktok.com/upload")
+            time.sleep(3)
+            
+            # Kiểm tra xem có upload form không
+            try:
+                WebDriverWait(self.driver, 5).until(
+                    EC.presence_of_element_located((By.XPATH, "//input[@type='file']"))
+                )
+                self.log("✅ Đã có session login, không cần login lại")
+                self.is_logged_in = True
+                return True
+            except:
+                return False
+        except Exception as e:
+            self.log(f"⚠️ Lỗi kiểm tra login: {e}")
+            return False
+
+    def login(self, wait_manual=True, headless=False):
         """
         Đăng nhập TikTok (hỗ trợ manual login để tránh 2FA)
         Args:
             wait_manual: Nếu True, chờ user nhấn Enter sau khi login
+            headless: Chạy headless mode
         """
         try:
             if not self.driver:
-                self.init_driver(headless=False)
+                self.init_driver(headless=headless)
 
+            # === BƯỚC 1: Thử load cookies cũ ===
+            if self.load_cookies():
+                if self.is_already_logged_in():
+                    self.is_logged_in = True
+                    return True
+            
+            # === BƯỚC 2: Login thủ công nếu cookies không hoạt động ===
             self.log("🔐 Mở trang TikTok để đăng nhập...")
             self.driver.get("https://www.tiktok.com/upload")
             
             if wait_manual:
                 self.log("👤 Vui lòng đăng nhập vào TikTok trong cửa sổ Chrome")
-                self.log("⏸️ Nhấn Enter trong terminal sau khi đăng nhập xong...")
+                self.log("💡 Tips: Có thể sử dụng Phone/Email/Username hoặc login bằng Google/Facebook")
+                self.log("⏸️ Nhấn Enter trong terminal sau khi đăng nhập + bôi xong upload form...")
                 input()
                 
-            # Kiểm tra đã login hay chưa
+            # === BƯỚC 3: Kiểm tra đã login hay chưa ===
             time.sleep(3)
             try:
                 WebDriverWait(self.driver, 10).until(
@@ -80,6 +165,9 @@ class TikTokUploader:
                 )
                 self.is_logged_in = True
                 self.log("✅ Đã đăng nhập TikTok thành công!")
+                
+                # === BƯỚC 4: Lưu cookies cho lần tới ===
+                self.save_cookies()
                 return True
             except:
                 self.log("❌ Login thất bại hoặc hết time")

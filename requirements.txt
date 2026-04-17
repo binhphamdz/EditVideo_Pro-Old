@@ -25,3 +25,4 @@ python-dotenv==1.0.0
 # Optional: For better performance
 aiohttp==3.9.0
 asyncio==3.4.3
+

@@ -207,17 +207,22 @@ class TikTokTab:
     def tiktok_login(self):
         """Đăng nhập TikTok"""
         if not self.uploader:
-            self.uploader = TikTokUploader(callback_log=self.add_log_upload)
+            # Tạo uploader với profile persistent
+            self.uploader = TikTokUploader(
+                callback_log=self.add_log_upload,
+                profile_name="tiktok_main"  # Lưu profile ở ~/.tiktok_profiles/tiktok_main/
+            )
         
-        self.btn_login.config(state="disabled", text="⏳ Đang mở Chrome...")
+        self.btn_login.config(state="disabled", text="⏳ Mở Chrome...")
         threading.Thread(target=self._login_thread, daemon=True).start()
 
     def _login_thread(self):
         """Xử lý login trong thread"""
         try:
             headless = self.chk_headless.get()
-            if self.uploader.login(wait_manual=True):
+            if self.uploader.login(wait_manual=True, headless=headless):
                 self.add_log_upload("✅ Đã đăng nhập thành công!")
+                self.add_log_upload("💡 Cookies đã được lưu, lần tới không cần login lại")
                 self.main_app.root.after(0, lambda: self.btn_login.config(state="normal", text="🔐 Đã Đăng Nhập", bg="#27ae60"))
             else:
                 self.add_log_upload("❌ Login thất bại!")
