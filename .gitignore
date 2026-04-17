@@ -1,0 +1,94 @@
+# 🚫 GIT IGNORE RULES - Chỉ push CODE, không push DATA/VIDEO
+
+# ================ PYTHON ================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# ================ DATA & WORKSPACE ================
+# Workspace_Data chứa projects, voices, videos
+Workspace_Data/
+
+# ================ MEDIA FILES ================
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.mp3
+*.wav
+*.flac
+*.m4a
+TikTok_Downloads/
+Kho_Voice/
+
+# ================ CREDENTIALS & CONFIGS ================
+# Giữ .env.example hoặc .env.template, không push .env thực
+.env
+*.json           # Credentials file
+client_secret.json
+credentials.json
+token.json
+config_dao_dien.json
+projects_list.json
+
+# ================ IDE & EDITOR ================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+*.sublime-project
+*.sublime-workspace
+
+# ================ CACHE & TEMP ================
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.cache
+*.cache
+*.tmp
+*.temp
+*.log
+
+# ================ FONT & MEDIA ASSETS ================
+# Giữ Font folder nếu là project assets, remove nếu là external
+# Font/             # Uncomment nếu không cần push fonts
+
+# ================ BUILD & DISTRIBUTION ================
+build/
+dist/
+*.exe
+*.dmg
+*.pkg
+
+# ================ OS SPECIFIC ================
+.DS_Store
+Thumbs.db
+*.lnk
+desktop.ini
+
+# ================ PYCACHE ================
+**/__pycache__/
+*.pyc
