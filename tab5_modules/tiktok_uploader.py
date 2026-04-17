@@ -1,5 +1,5 @@
 """
-🎬 TikTok Auto Uploader - Upload video tự động lên TikTok bằng Selenium
+🎬 TikTok Auto Uploader V2 - Improved with better UI detection
 Hỗ trợ: Batch upload, hashtag tự động, delay chống spam, lưu cookies
 """
 
@@ -44,58 +44,18 @@ class TikTokUploader:
         try:
             if self.driver is None:
                 return False
-            # Thử gọi get_window_size - nếu session mất sẽ throw exception
             self.driver.get_window_size()
             return True
         except Exception as e:
             if "invalid session id" in str(e).lower():
-                self.log(f"⚠️ Phát hiện driver session mất: {e}")
+                self.log(f"⚠️ Driver session mất")
             return False
-
-    def wait_page_load(self, timeout=10):
-        """Chờ page load hoàn thành"""
-        try:
-            WebDriverWait(self.driver, timeout).until(
-                lambda driver: driver.execute_script("return document.readyState") == "complete"
-            )
-            return True
-        except:
-            return False
-
-    def safe_find_element(self, xpath, timeout=10, retries=2):
-        """
-        Tìm element với retry logic
-        Nếu session bị mất sẽ tự động khôi phục
-        """
-        for attempt in range(retries):
-            try:
-                element = WebDriverWait(self.driver, timeout).until(
-                    EC.presence_of_element_located((By.XPATH, xpath))
-                )
-                return element
-            except Exception as e:
-                if "invalid session id" in str(e).lower() and attempt < retries - 1:
-                    self.log(f"⚠️ Session bị mất (attempt {attempt+1}/{retries}), khôi phục...")
-                    self.close()
-                    self.init_driver(headless=False)
-                    time.sleep(1)
-                    
-                    if self.load_cookies() and self.is_already_logged_in():
-                        self.log("✅ Đã khôi phục session, thử lại...")
-                        time.sleep(1)
-                        continue
-                    else:
-                        raise Exception("Không thể khôi phục session")
-                else:
-                    raise
-        return None
 
     def init_driver(self, headless=False):
         """Khởi tạo Selenium Chrome driver với persistent profile"""
         try:
             options = Options()
             
-            # Tạo profile để lưu cookies & data
             os.makedirs(self.profile_path, exist_ok=True)
             options.add_argument(f"user-data-dir={self.profile_path}")
             
@@ -111,7 +71,6 @@ class TikTokUploader:
                 "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
             )
 
-            # Use webdriver-manager để auto-download ChromeDriver matching version
             service = Service(ChromeDriverManager().install())
             self.driver = webdriver.Chrome(service=service, options=options)
             self.log("✅ Chrome driver khởi tạo thành công")
@@ -127,7 +86,7 @@ class TikTokUploader:
             cookies = self.driver.get_cookies()
             with open(self.cookies_file, 'w') as f:
                 json.dump(cookies, f, indent=2)
-            self.log(f"💾 Đã lưu cookies vào {self.cookies_file}")
+            self.log(f"💾 Đã lưu cookies")
         except Exception as e:
             self.log(f"⚠️ Lỗi lưu cookies: {e}")
 
@@ -135,7 +94,7 @@ class TikTokUploader:
         """Load cookies từ file"""
         try:
             if not os.path.exists(self.cookies_file):
-                self.log("⚠️ Chưa có cookies lưu sẵn, sẽ phải login lại")
+                self.log("⚠️ Chưa có cookies lưu sẵn")
                 return False
             
             self.driver.get("https://www.tiktok.com")
@@ -146,14 +105,13 @@ class TikTokUploader:
             
             for cookie in cookies:
                 try:
-                    # Remove attributes that can't be set
                     if 'expiry' in cookie:
                         del cookie['expiry']
                     self.driver.add_cookie(cookie)
-                except Exception as e:
-                    pass  # Skip cookies that can't be added
+                except:
+                    pass
             
-            self.log("✅ Đã load cookies từ file")
+            self.log("✅ Đã load cookies")
             time.sleep(2)
             self.driver.refresh()
             return True
@@ -164,16 +122,14 @@ class TikTokUploader:
     def is_already_logged_in(self):
         """Kiểm tra xem đã login hay chưa"""
         try:
-            self.driver.get("https://www.tiktok.com/upload")
+            self.driver.get("https://www.tiktok.com/@me/upload")
             time.sleep(3)
             
-            # Kiểm tra xem có upload form không
             try:
                 WebDriverWait(self.driver, 5).until(
                     EC.presence_of_element_located((By.XPATH, "//input[@type='file']"))
                 )
-                self.log("✅ Đã có session login, không cần login lại")
-                self.is_logged_in = True
+                self.log("✅ Đã có session login")
                 return True
             except:
                 return False
@@ -182,64 +138,44 @@ class TikTokUploader:
             return False
 
     def login(self, wait_manual=True, headless=False):
-        """
-        Đăng nhập TikTok (hỗ trợ manual login để tránh 2FA)
-        Args:
-            wait_manual: Nếu True, chờ user nhấn Enter sau khi login
-            headless: Chạy headless mode
-        """
+        """Đăng nhập TikTok (hỗ trợ manual login)"""
         try:
             if not self.driver:
                 self.init_driver(headless=headless)
 
-            # === BƯỚC 1: Thử load cookies cũ ===
+            # Thử load cookies cũ
             if self.load_cookies():
                 if self.is_already_logged_in():
                     self.is_logged_in = True
                     return True
             
-            # === BƯỚC 2: Login thủ công nếu cookies không hoạt động ===
-            self.log("🔐 Mở trang TikTok để đăng nhập...")
-            self.driver.get("https://www.tiktok.com/upload")
+            # Login thủ công
+            self.driver.get("https://www.tiktok.com/login")
+            self.log("🔐 Vui lòng đăng nhập vào TikTok trong browser...")
             
             if wait_manual:
-                self.log("👤 Vui lòng đăng nhập vào TikTok trong cửa sổ Chrome")
-                self.log("💡 Tips: Có thể sử dụng Phone/Email/Username hoặc login bằng Google/Facebook")
-                self.log("⏸️ Nhấn Enter trong terminal sau khi đăng nhập + bôi xong upload form...")
-                input()
-                
-            # === BƯỚC 3: Kiểm tra đã login hay chưa ===
-            time.sleep(3)
+                input_msg = f"\n>>> Sau khi login xong, nhấn Enter trong terminal để tiếp tục...\n>>> "
+                input(input_msg)
+            
+            # Chờ redirect về upload page
             try:
-                WebDriverWait(self.driver, 10).until(
+                WebDriverWait(self.driver, 20).until(
                     EC.presence_of_element_located((By.XPATH, "//input[@type='file']"))
                 )
                 self.is_logged_in = True
-                self.log("✅ Đã đăng nhập TikTok thành công!")
-                
-                # === BƯỚC 4: Lưu cookies cho lần tới ===
                 self.save_cookies()
                 return True
             except:
-                self.log("❌ Login thất bại hoặc hết time")
+                self.log("❌ Login thất bại")
                 return False
         except Exception as e:
             self.log(f"❌ Lỗi login: {e}")
             return False
 
     def upload_video(self, video_path, title="", description="", hashtags=""):
-        """
-        Upload 1 video lên TikTok
-        Args:
-            video_path: Đường dẫn file video
-            title: Tiêu đề video
-            description: Mô tả video
-            hashtags: Hashtag (cách nhau bằng space, vd: "#quochp #viral")
-        Returns:
-            True nếu upload thành công
-        """
+        """Upload 1 video lên TikTok"""
         if not self.is_logged_in:
-            self.log("⚠️ Chưa đăng nhập! Vui lòng login trước")
+            self.log("⚠️ Chưa đăng nhập!")
             return False
 
         if not os.path.exists(video_path):
@@ -247,260 +183,159 @@ class TikTokUploader:
             return False
 
         try:
-            # === KIỂM TRA DRIVER SESSION ===
+            # === SESSION CHECK ===
             if not self.is_driver_alive():
-                self.log("⚠️ Driver session bị mất, khôi phục lại...")
+                self.log("⚠️ Session mất, khôi phục...")
                 self.close()
                 self.init_driver(headless=False)
                 time.sleep(2)
                 
-                # Load cookies để tân tạo session
-                if not self.load_cookies():
-                    self.log("❌ Không thể tân tạo session")
+                if not self.load_cookies() or not self.is_already_logged_in():
+                    self.log("❌ Không thể khôi phục session")
                     return False
                     
-                # Kiểm tra login lại
-                if not self.is_already_logged_in():
-                    self.log("❌ Không thể khôi phục login session")
-                    return False
-                    
-                self.log("✅ Đã khôi phục driver session")
+                self.log("✅ Đã khôi phục session")
                 time.sleep(2)
             
             self.uploading = True
             video_name = os.path.basename(video_path)
             self.log(f"🚀 Bắt đầu upload: {video_name}")
 
-            # === BƯỚC 1: Upload file ===
+            # === STEP 1: Navigate & Choose File ===
             self.log("1️⃣ Chọn file video...")
             
-            # Đảm bảo navigate đến upload page
             try:
-                self.driver.get("https://www.tiktok.com/upload")
-                self.wait_page_load(timeout=10)
+                self.driver.get("https://www.tiktok.com/@me/upload")
+                time.sleep(3)
             except:
-                pass  # Tiếp tục nếu không navigate được
+                pass
             
-            time.sleep(2)
-            
-            file_input = self.safe_find_element("//input[@type='file']", timeout=20, retries=2)
-            if not file_input:
-                self.log("❌ Không tìm thấy input file")
-                return False
-                
+            file_input = WebDriverWait(self.driver, 20).until(
+                EC.presence_of_element_located((By.XPATH, "//input[@type='file']"))
+            )
             file_input.send_keys(os.path.abspath(video_path))
             self.log("✅ File đã chọn")
 
-            # === BƯỚC 2: Chờ upload hoàn thành & chỉnh sửa ===
-            time.sleep(5)
+            # === STEP 2: Wait for upload to complete ===
             self.log("2️⃣ Chờ video xử lý...")
+            time.sleep(8)
             
-            # Chờ nút "Next" hoặc có thể page sẽ auto-redirect
+            # Try to find any form element (sign of form being ready)
             try:
-                # Thử click button nếu tồn tại (có timeout ngắn hơn)
-                next_btn = WebDriverWait(self.driver, 30).until(
-                    EC.element_to_be_clickable(
-                        (By.XPATH, "//button[contains(text(), 'Next') or contains(text(), 'Tiếp tục') or contains(., 'next') or contains(., 'next')]")
-                    )
+                WebDriverWait(self.driver, 45).until(
+                    EC.presence_of_element_located((By.XPATH, "//textarea | //input[@type='text'] | //div[@contenteditable='true']"))
                 )
-                next_btn.click()
-                self.log("✅ Bấm Next")
-                time.sleep(3)
-            except Exception as e:
-                # Không bắt buộc có Next button - TikTok UI có thể đã thay đổi
-                self.log(f"⚠️ Không tìm thấy nút Next ({str(e)[:30]}...), thử tiếp tục...")
-                time.sleep(3)
-                
-                # Thử điều hướng sang bước tiếp theo bằng cách click vào form fields
-                try:
-                    # Nếu có modal/dialog overlay, cố gắng tìm các elements trong đó
-                    self.driver.execute_script("window.scrollBy(0, 500);")
-                    time.sleep(1)
-                except:
-                    pass
+                self.log("✅ Form ready")
+            except:
+                self.log("⚠️ Form elements not found, continuing anyway...")
 
-            # === BƯỚC 3: Nhập text ===
-            time.sleep(3)
+            # === STEP 3: Fill caption ===
+            time.sleep(2)
             self.log("3️⃣ Nhập mô tả...")
             
-            caption_text = f"{title}\n\n{description}\n\n{hashtags}".strip()
+            caption_text = f"{title}\n\n{description}\n\n{hashtags}".strip() if title or description else hashtags
             caption_filled = False
             
-            # Chiến lược 1: Tìm textarea thông thường
-            caption_xpath_options = [
-                "//textarea[@placeholder*='caption' or @placeholder*='caption']",
-                "//textarea[@placeholder*='Describe' or @placeholder*='Mô tả']",
-                "//textarea",
-                "//div[@contenteditable='true' and contains(., '')]",
-                "//input[@type='text' and (@placeholder*='caption' or @placeholder*='describe')]"
-            ]
-            
-            for xpath in caption_xpath_options:
+            # Try multiple selectors
+            for xpath in ["//textarea", "//div[@contenteditable='true']", "//input[@type='text']"]:
                 try:
-                    caption_elem = WebDriverWait(self.driver, 5).until(
-                        EC.presence_of_element_located((By.XPATH, xpath))
-                    )
-                    caption_elem.click()
-                    time.sleep(0.5)
-                    caption_elem.clear()
-                    caption_elem.send_keys(caption_text)
-                    self.log(f"✅ Nhập mô tả: {caption_text[:50]}...")
-                    caption_filled = True
-                    break
+                    elements = self.driver.find_elements(By.XPATH, xpath)
+                    for elem in elements:
+                        if elem.is_displayed():
+                            elem.click()
+                            time.sleep(0.3)
+                            elem.send_keys(Keys.CONTROL + 'a')
+                            elem.send_keys(caption_text)
+                            self.log(f"✅ Nhập: {caption_text[:40]}...")
+                            caption_filled = True
+                            break
+                    if caption_filled:
+                        break
                 except:
                     continue
 
-            # Chiến lược 2: Nếu textarea không tìm được, thử lấy focus vào element và type
             if not caption_filled:
-                try:
-                    # Tìm và focus vào contenteditable div
-                    editable_divs = self.driver.find_elements(By.XPATH, "//div[@contenteditable='true']")
-                    if editable_divs:
-                        for div in editable_divs:
-                            if div.is_displayed():
-                                div.click()
-                                time.sleep(0.5)
-                                # Xóa cũ
-                                div.send_keys(Keys.CONTROL + 'a')
-                                div.send_keys(caption_text)
-                                self.log(f"✅ Nhập mô tả (contenteditable): {caption_text[:50]}...")
-                                caption_filled = True
-                                break
-                except:
-                    pass
+                self.log("⚠️ Không tìm thấy ô caption")
 
-            if not caption_filled:
-                self.log("⚠️ Không tìm thấy ô nhập mô tả (có thể UI đã thay đổi)")
-
-            # === BƯỚC 4: Chỉnh quyền riêng tư ===
-            time.sleep(2)
-            self.log("4️⃣ Chỉnh quyền riêng tư (Public)...")
+            # === STEP 4: Privacy (optional) ===
+            time.sleep(1)
+            self.log("4️⃣ Chỉnh quyền riêng tư...")
             try:
-                privacy_selector = WebDriverWait(self.driver, 10).until(
-                    EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Public') or contains(text(), 'Công khai')]"))
-                )
-                privacy_selector.click()
-                self.log("✅ Đặt thành Public")
-            except:
-                self.log("⚠️ Không thể thay đổi quyền riêng tư")
-
-            # === BƯỚC 5: Post ===
-            time.sleep(3)
-            self.log("5️⃣ Nhấn Post/Upload...")
-            try:
-                # Chiến lược 1: Tìm nút Post/Upload
-                post_selectors = [
-                    "//button[contains(text(), 'Post')]",
-                    "//button[contains(text(), 'Upload')]",
-                    "//button[contains(text(), 'Đăng')]",
-                    "//button[contains(.//span, 'Post')]",
-                    "//button[contains(.//span, 'Upload')]",
-                    "//button[@type='submit' and contains(., 'Post')]",
-                    "//button[contains(@class, 'upload') or contains(@class, 'submit')]",
-                ]
-                
-                post_btn = None
-                for selector in post_selectors:
+                for selector in ["//button[contains(., 'Public')]", "//label[contains(., 'Public')]"]:
                     try:
-                        post_btn = WebDriverWait(self.driver, 5).until(
-                            EC.element_to_be_clickable((By.XPATH, selector))
-                        )
-                        if post_btn and post_btn.is_displayed():
+                        btn = self.driver.find_element(By.XPATH, selector)
+                        if btn.is_displayed():
+                            btn.click()
+                            self.log("✅ Public")
                             break
                     except:
-                        continue
-                
-                if not post_btn:
-                    self.log("⚠️ Không tìm thấy nút Post, thử scroll tìm...")
-                    self.driver.execute_script("window.scrollBy(0, 300);")
-                    time.sleep(1)
-                    post_btn = WebDriverWait(self.driver, 10).until(
-                        EC.element_to_be_clickable(
-                            (By.XPATH, "//button[contains(text(), 'Post') or contains(text(), 'Upload') or contains(text(), 'Đăng')]")
-                        )
-                    )
-                
-                post_btn.click()
-                self.log("✅ Nhấn Post")
-                
-                # Chờ thông báo thành công
-                time.sleep(10)
+                        pass
+            except:
+                pass
+
+            # === STEP 5: Post ===
+            self.log("5️⃣ Nhấn Post...")
+            time.sleep(2)
+            
+            # Scroll down to find button
+            self.driver.execute_script("window.scrollBy(0, 500);")
+            time.sleep(2)
+            
+            for selector in ["//button[contains(., 'Post')]", "//button[contains(., 'Upload')]", "//button[@type='submit']"]:
                 try:
-                    success = self.driver.find_element(By.XPATH, "//span[contains(text(), 'successfully') or contains(text(), 'thành công')]")
-                    self.log(f"🎉 THÀNH CÔNG: {video_name}")
+                    post_btn = WebDriverWait(self.driver, 10).until(
+                        EC.element_to_be_clickable((By.XPATH, selector))
+                    )
+                    post_btn.click()
+                    self.log("✅ Nhấn Post")
+                    time.sleep(15)  # Wait for upload
                     return True
                 except:
-                    # Không nhất thiết phải thấy thông báo - có thể upload đã được submit
-                    self.log("⚠️ Upload submitted (kiểm tra TikTok để xác nhận)")
-                    return True
-                    
-            except Exception as e:
-                self.log(f"❌ Lỗi nhấn Post: {e}")
-                # Tuy lỗi nhưng video có thể đã được upload
-                return False
+                    continue
+            
+            self.log("⚠️ Không tìm thấy Post button")
+            return False
 
         except Exception as e:
-            self.log(f"❌ Lỗi upload: {e}")
+            self.log(f"❌ Lỗi: {str(e)[:80]}")
             return False
         finally:
             self.uploading = False
-            # Reload để upload video tiếp theo
-            time.sleep(2)
-            try:
-                self.driver.get("https://www.tiktok.com/upload")
-            except:
-                self.log("⚠️ Không thể reload upload form")
 
-    def upload_batch(self, video_files, title_template="", description_template="", hashtags="", delay_seconds=180):
-        """
-        Upload batch video
-        Args:
-            video_files: List đường dẫn video
-            title_template: Template tiêu đề (có thể có {filename}, {index})
-            description_template: Template mô tả
-            hashtags: Hashtag chung
-            delay_seconds: Delay giữa các upload (chống spam)
-        """
-        success = 0
-        failed = 0
-
-        for idx, video_file in enumerate(video_files, 1):
-            if not os.path.exists(video_file):
-                self.log(f"⏭️ Bỏ qua: File không tồn tại {video_file}")
-                failed += 1
-                continue
-
-            filename = os.path.splitext(os.path.basename(video_file))[0]
+    def upload_batch(self, videos, delay_seconds=120):
+        """Upload batch videos"""
+        self.log(f"📦 Bắt đầu upload batch {len(videos)} videos...")
+        
+        success_count = 0
+        for i, video_info in enumerate(videos, 1):
+            self.log(f"\n📌 VIDEO {i}/{len(videos)}")
+            self.log("=" * 60)
             
-            # Thay thế template
-            title = title_template.format(filename=filename, index=idx)
-            description = description_template.format(filename=filename, index=idx)
-
-            self.log(f"\n{'='*60}")
-            self.log(f"📌 VIDEO {idx}/{len(video_files)}")
-            self.log(f"{'='*60}")
-
-            if self.upload_video(video_file, title, description, hashtags):
-                success += 1
-            else:
-                failed += 1
-
-            # Delay giữa các upload
-            if idx < len(video_files):
-                self.log(f"⏳ Chờ {delay_seconds}s trước upload tiếp theo...")
-                for remaining in range(delay_seconds, 0, -1):
-                    if remaining % 10 == 0:
-                        self.log(f"   Còn {remaining}s...")
-                    time.sleep(1)
-
-        self.log(f"\n{'='*60}")
+            result = self.upload_video(
+                video_path=video_info.get('path', video_info),
+                title=video_info.get('title', ''),
+                description=video_info.get('description', ''),
+                hashtags=video_info.get('hashtags', '')
+            )
+            
+            if result:
+                success_count += 1
+            
+            if i < len(videos):
+                self.log(f"⏳ Chờ {delay_seconds}s trước video tiếp theo...")
+                time.sleep(delay_seconds)
+        
+        self.log(f"\n{'=' * 60}")
         self.log(f"🎊 BATCH UPLOAD XONG!")
-        self.log(f"✅ Thành công: {success}")
-        self.log(f"❌ Thất bại: {failed}")
-        self.log(f"{'='*60}")
+        self.log(f"✅ Thành công: {success_count}")
+        self.log(f"❌ Thất bại: {len(videos) - success_count}")
+        self.log(f"{'=' * 60}\n")
 
     def close(self):
-        """Đóng browser"""
-        if self.driver:
-            self.driver.quit()
-            self.log("🔌 Đã đóng Chrome")
+        """Đóng driver"""
+        try:
+            if self.driver:
+                self.driver.quit()
+                self.log("✅ Đã đóng driver")
+        except:
+            pass
