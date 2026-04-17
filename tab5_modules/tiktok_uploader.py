@@ -120,54 +120,88 @@ class TikTokUploader:
             return False
 
     def is_already_logged_in(self):
-        """Kiểm tra xem đã login hay chưa"""
+        """Kiểm tra xem đã login hay chưa (bằng cách navigate đến upload page)"""
         try:
             self.driver.get("https://www.tiktok.com/@me/upload")
-            time.sleep(3)
             
+            # Chờ page load
+            WebDriverWait(self.driver, 2).until(
+                lambda driver: driver.execute_script("return document.readyState") == "complete"
+            )
+            time.sleep(2)
+            
+            # Kiểm tra các dấu hiệu của login thành công
             try:
+                # Cách 1: Tìm file input (dấu hiệu upload page)
                 WebDriverWait(self.driver, 5).until(
                     EC.presence_of_element_located((By.XPATH, "//input[@type='file']"))
                 )
-                self.log("✅ Đã có session login")
+                self.log("✅ Đã đăng nhập (tìm thấy upload form)")
                 return True
             except:
-                return False
+                # Cách 2: Kiểm tra URL (nếu redirect thành công)
+                current_url = self.driver.current_url
+                if "@me/upload" in current_url or "/upload" in current_url:
+                    self.log("✅ Đã đăng nhập (URL check)")
+                    return True
+                # Cách 3: Kiểm tra header/user element
+                try:
+                    self.driver.find_element(By.XPATH, "//div[contains(@class, 'user') or contains(@class, 'profile') or contains(@class, 'avatar')]")
+                    self.log("✅ Đã đăng nhập (user element found)")
+                    return True
+                except:
+                    return False
         except Exception as e:
-            self.log(f"⚠️ Lỗi kiểm tra login: {e}")
+            self.log(f"⚠️ Lỗi kiểm tra login: {str(e)[:40]}")
             return False
 
+    def auto_login(self, headless=False):
+        """Tự động đăng nhập - thử cookies trước, không hỏi manual input"""
+        return self.login(wait_manual=False, headless=headless)
+
     def login(self, wait_manual=True, headless=False):
-        """Đăng nhập TikTok (hỗ trợ manual login)"""
+        """Đăng nhập TikTok - Cache cookies nếu có sẵn"""
         try:
             if not self.driver:
                 self.init_driver(headless=headless)
 
-            # Thử load cookies cũ
+            # === BƯỚC 1: Thử load cookies ===
+            self.log("🔄 Kiểm tra cookies...")
             if self.load_cookies():
+                self.log("⏳ Kiểm tra xem cookies còn valid không...")
+                time.sleep(2)
+                
+                # Kiểm tra login
                 if self.is_already_logged_in():
+                    self.log("✅ Cookies vẫn hợp lệ - Tự động đăng nhập!")
                     self.is_logged_in = True
                     return True
+                else:
+                    self.log("⚠️ Cookies hết hạn, cần đăng nhập lại")
             
-            # Login thủ công
-            self.driver.get("https://www.tiktok.com/login")
+            # === BƯỚC 2: Nếu cookies không có hoặc hết hạn - Yêu cầu manual login ===
             self.log("🔐 Vui lòng đăng nhập vào TikTok trong browser...")
+            self.driver.get("https://www.tiktok.com/login")
+            time.sleep(2)
             
             if wait_manual:
-                input_msg = f"\n>>> Sau khi login xong, nhấn Enter trong terminal để tiếp tục...\n>>> "
+                input_msg = f"\n>>> Sau khi login xong, nhấn Enter để tiếp tục...\n>>> "
                 input(input_msg)
             
-            # Chờ redirect về upload page
+            # === BƯỚC 3: Chờ upload page load ===
+            time.sleep(3)
             try:
                 WebDriverWait(self.driver, 20).until(
                     EC.presence_of_element_located((By.XPATH, "//input[@type='file']"))
                 )
                 self.is_logged_in = True
+                self.log("✅ Login thành công!")
                 self.save_cookies()
                 return True
             except:
-                self.log("❌ Login thất bại")
+                self.log("❌ Login thất bại - Không tìm thấy upload form")
                 return False
+                
         except Exception as e:
             self.log(f"❌ Lỗi login: {e}")
             return False
