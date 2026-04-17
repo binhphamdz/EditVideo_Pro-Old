@@ -46,7 +46,7 @@ ffmpeg_reader.FFMPEG_VideoReader.__del__ = safe_del
 from tab1_broll import BRollTab
 from tab2_modules import FacelessTab
 from tab4_manager import ManagerTab
-from tab5_tiktok import TikTokTab
+# from tab5_tiktok import TikTokTab  # [ĐÃ XÓA]
 from tab6_subtitle import SubtitleTab  
 from tab7_script import ScriptTab  
 from tab8_telegram import TelegramTab # <--- IMPORT TAB 8 MỚI
@@ -214,9 +214,7 @@ class MainApp:
         self.tab2 = FacelessTab(self.frame_tab2, self)
         self.tab4 = ManagerTab(self.frame_tab4, self) 
 
-        self.tab5_frame = tk.Frame(self.notebook, bg="#f4f6f9")
-        self.notebook.add(self.tab5_frame, text=" 🎵 TẢI VIDEO TIK TOK ")
-        self.tab5 = TikTokTab(self.tab5_frame, self)
+        # [ĐÃ XÓA] TikTok Upload Tab
 
         self.tab7_frame = tk.Frame(self.notebook, bg="#f4f6f9")
         self.notebook.add(self.tab7_frame, text="🍲 XÀO KỊCH BẢN")
