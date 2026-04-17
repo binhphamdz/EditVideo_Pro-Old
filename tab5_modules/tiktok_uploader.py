@@ -295,40 +295,53 @@ class TikTokUploader:
             time.sleep(5)
             self.log("2️⃣ Chờ video xử lý...")
             
-            # Chờ nút "Next" xuất hiện
+            # Chờ nút "Next" hoặc có thể page sẽ auto-redirect
             try:
-                next_btn = WebDriverWait(self.driver, 60).until(
+                # Thử click button nếu tồn tại (có timeout ngắn hơn)
+                next_btn = WebDriverWait(self.driver, 30).until(
                     EC.element_to_be_clickable(
-                        (By.XPATH, "//button[contains(text(), 'Next') or contains(., 'Tiếp tục')]")
+                        (By.XPATH, "//button[contains(text(), 'Next') or contains(text(), 'Tiếp tục') or contains(., 'next') or contains(., 'next')]")
                     )
                 )
                 next_btn.click()
                 self.log("✅ Bấm Next")
-            except:
-                self.log("⚠️ Không tìm thấy nút Next, tiếp tục...")
+                time.sleep(3)
+            except Exception as e:
+                # Không bắt buộc có Next button - TikTok UI có thể đã thay đổi
+                self.log(f"⚠️ Không tìm thấy nút Next ({str(e)[:30]}...), thử tiếp tục...")
+                time.sleep(3)
+                
+                # Thử điều hướng sang bước tiếp theo bằng cách click vào form fields
+                try:
+                    # Nếu có modal/dialog overlay, cố gắng tìm các elements trong đó
+                    self.driver.execute_script("window.scrollBy(0, 500);")
+                    time.sleep(1)
+                except:
+                    pass
 
             # === BƯỚC 3: Nhập text ===
             time.sleep(3)
             self.log("3️⃣ Nhập mô tả...")
             
-            # Tìm và fill caption/description
+            caption_text = f"{title}\n\n{description}\n\n{hashtags}".strip()
+            caption_filled = False
+            
+            # Chiến lược 1: Tìm textarea thông thường
             caption_xpath_options = [
                 "//textarea[@placeholder*='caption' or @placeholder*='caption']",
                 "//textarea[@placeholder*='Describe' or @placeholder*='Mô tả']",
                 "//textarea",
-                "//div[@contenteditable='true']"
+                "//div[@contenteditable='true' and contains(., '')]",
+                "//input[@type='text' and (@placeholder*='caption' or @placeholder*='describe')]"
             ]
             
-            caption_text = f"{title}\n\n{description}\n\n{hashtags}".strip()
-            
-            caption_filled = False
             for xpath in caption_xpath_options:
                 try:
-                    caption_elem = WebDriverWait(self.driver, 10).until(
+                    caption_elem = WebDriverWait(self.driver, 5).until(
                         EC.presence_of_element_located((By.XPATH, xpath))
                     )
                     caption_elem.click()
-                    time.sleep(1)
+                    time.sleep(0.5)
                     caption_elem.clear()
                     caption_elem.send_keys(caption_text)
                     self.log(f"✅ Nhập mô tả: {caption_text[:50]}...")
@@ -337,8 +350,27 @@ class TikTokUploader:
                 except:
                     continue
 
+            # Chiến lược 2: Nếu textarea không tìm được, thử lấy focus vào element và type
             if not caption_filled:
-                self.log("⚠️ Không tìm thấy ô nhập mô tả")
+                try:
+                    # Tìm và focus vào contenteditable div
+                    editable_divs = self.driver.find_elements(By.XPATH, "//div[@contenteditable='true']")
+                    if editable_divs:
+                        for div in editable_divs:
+                            if div.is_displayed():
+                                div.click()
+                                time.sleep(0.5)
+                                # Xóa cũ
+                                div.send_keys(Keys.CONTROL + 'a')
+                                div.send_keys(caption_text)
+                                self.log(f"✅ Nhập mô tả (contenteditable): {caption_text[:50]}...")
+                                caption_filled = True
+                                break
+                except:
+                    pass
+
+            if not caption_filled:
+                self.log("⚠️ Không tìm thấy ô nhập mô tả (có thể UI đã thay đổi)")
 
             # === BƯỚC 4: Chỉnh quyền riêng tư ===
             time.sleep(2)
@@ -356,11 +388,38 @@ class TikTokUploader:
             time.sleep(3)
             self.log("5️⃣ Nhấn Post/Upload...")
             try:
-                post_btn = WebDriverWait(self.driver, 20).until(
-                    EC.element_to_be_clickable(
-                        (By.XPATH, "//button[contains(text(), 'Post') or contains(text(), 'Đăng') or contains(text(), 'Upload')]")
+                # Chiến lược 1: Tìm nút Post/Upload
+                post_selectors = [
+                    "//button[contains(text(), 'Post')]",
+                    "//button[contains(text(), 'Upload')]",
+                    "//button[contains(text(), 'Đăng')]",
+                    "//button[contains(.//span, 'Post')]",
+                    "//button[contains(.//span, 'Upload')]",
+                    "//button[@type='submit' and contains(., 'Post')]",
+                    "//button[contains(@class, 'upload') or contains(@class, 'submit')]",
+                ]
+                
+                post_btn = None
+                for selector in post_selectors:
+                    try:
+                        post_btn = WebDriverWait(self.driver, 5).until(
+                            EC.element_to_be_clickable((By.XPATH, selector))
+                        )
+                        if post_btn and post_btn.is_displayed():
+                            break
+                    except:
+                        continue
+                
+                if not post_btn:
+                    self.log("⚠️ Không tìm thấy nút Post, thử scroll tìm...")
+                    self.driver.execute_script("window.scrollBy(0, 300);")
+                    time.sleep(1)
+                    post_btn = WebDriverWait(self.driver, 10).until(
+                        EC.element_to_be_clickable(
+                            (By.XPATH, "//button[contains(text(), 'Post') or contains(text(), 'Upload') or contains(text(), 'Đăng')]")
+                        )
                     )
-                )
+                
                 post_btn.click()
                 self.log("✅ Nhấn Post")
                 
@@ -371,11 +430,13 @@ class TikTokUploader:
                     self.log(f"🎉 THÀNH CÔNG: {video_name}")
                     return True
                 except:
-                    self.log("⚠️ Không chắc upload thành công, nhưng không có lỗi")
+                    # Không nhất thiết phải thấy thông báo - có thể upload đã được submit
+                    self.log("⚠️ Upload submitted (kiểm tra TikTok để xác nhận)")
                     return True
                     
             except Exception as e:
                 self.log(f"❌ Lỗi nhấn Post: {e}")
+                # Tuy lỗi nhưng video có thể đã được upload
                 return False
 
         except Exception as e:
