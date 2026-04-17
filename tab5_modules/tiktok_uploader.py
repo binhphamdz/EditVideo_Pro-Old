@@ -336,8 +336,16 @@ class TikTokUploader:
         finally:
             self.uploading = False
 
-    def upload_batch(self, videos, delay_seconds=120):
-        """Upload batch videos"""
+    def upload_batch(self, videos, title_template="", description="", hashtags="", delay_seconds=120):
+        """
+        Upload batch videos lên TikTok
+        Args:
+            videos: List các file path hoặc dict {'path': video_path, ...}
+            title_template: Template tiêu đề cho all videos
+            description: Mô tả chung cho all videos
+            hashtags: Hashtags chung cho all videos
+            delay_seconds: Khoảng chờ giữa các video
+        """
         self.log(f"📦 Bắt đầu upload batch {len(videos)} videos...")
         
         success_count = 0
@@ -345,11 +353,23 @@ class TikTokUploader:
             self.log(f"\n📌 VIDEO {i}/{len(videos)}")
             self.log("=" * 60)
             
+            # Xử lý cả file path strings và dict format
+            if isinstance(video_info, dict):
+                video_path = video_info.get('path', video_info)
+                title = video_info.get('title', title_template)
+                desc = video_info.get('description', description)
+                tags = video_info.get('hashtags', hashtags)
+            else:
+                video_path = video_info
+                title = title_template
+                desc = description
+                tags = hashtags
+            
             result = self.upload_video(
-                video_path=video_info.get('path', video_info),
-                title=video_info.get('title', ''),
-                description=video_info.get('description', ''),
-                hashtags=video_info.get('hashtags', '')
+                video_path=video_path,
+                title=title,
+                description=desc,
+                hashtags=tags
             )
             
             if result:
