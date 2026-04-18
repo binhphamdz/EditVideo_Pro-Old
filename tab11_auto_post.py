@@ -1072,20 +1072,38 @@ class AutoPostTab:
                 self.manual_push_video(video_name)
 
     def manual_push_video(self, video_name):
-        video_path = resolve_shopee_video_path(video_name)
+        # 1. TÌM ĐƯỜNG DẪN CỦA VIDEO TRÊN MÁY TÍNH (WINDOWS)
+        video_path = ""
+        
+        # Ưu tiên bới trong danh sách công việc (jobs) đang hiện trên bảng
+        if hasattr(self, "jobs"):
+            for job in self.jobs:
+                if job.get("video_name") == video_name:
+                    video_path = job.get("video_path", "")
+                    break
+                    
+        # Nếu vẫn chưa thấy, tự động dò ở thư mục xuất video mặc định của Tool
+        if not video_path or not os.path.exists(video_path):
+            video_path = os.path.join(os.getcwd(), "Workspace_Data", "Shopee_Export", video_name)
+            
+        # Kiểm tra lần cuối, nếu máy tính thực sự không có file này thì báo lỗi chuẩn chỉ
         if not os.path.exists(video_path):
-            messagebox.showerror("Lỗi", f"Không tìm thấy file video:\n{video_path}")
+            messagebox.showerror("Lỗi", f"Không tìm thấy file trên MÁY TÍNH!\nĐang tìm tại:\n{video_path}\n\n(Lưu ý: Chỉ đăng file Video .mp4, không đăng file âm thanh .MP3 sếp nhé!)")
             return
 
+        # =========================================================
+        # (Phần code bên dưới sếp giữ nguyên không đổi)
+        # =========================================================
         selected_devices = []
         if hasattr(self.main_app, "tab5"):
             selected_devices = self.main_app.tab5.get_selected_devices()
 
         if not selected_devices:
-            messagebox.showwarning("Thiếu máy", "Bác chưa tick chọn máy điện thoại nào ở tab Quản Lý Điện Thoại để bắn sang!")
+            messagebox.showwarning("Thiếu máy", "Bác chưa tick chọn máy điện thoại nào ở tab Quản Lý Điện Thoại!")
             return
 
-        self.show_status_temp(f"🚀 Đang bắn video {video_name} sang {len(selected_devices)} máy... Bác đợi xíu nhé!", "blue", 3000)
+        self.show_status_temp(f"🚀 Đang bắn video {video_name} sang {len(selected_devices)} máy...", "blue", 3000)
+
 
         def push_task():
             adb_cmd = self.get_adb_path()
