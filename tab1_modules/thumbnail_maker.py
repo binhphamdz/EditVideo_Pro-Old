@@ -11,8 +11,11 @@ class ThumbnailHandler:
     def __init__(self, ui_tab):
         self.ui = ui_tab
 
-    def generate(self, broll_dir, trash_dir, act_files, tr_files):
-        p_data = self.ui.main_app.get_project_data(self.ui.current_project_id)
+    def generate(self, project_id, broll_dir, trash_dir, act_files, tr_files, render_request_id=None):
+        if not project_id or project_id not in self.ui.main_app.projects:
+            return
+
+        p_data = self.ui.main_app.get_project_data(project_id)
         changed = False
         
         # Đảm bảo data không bị null nếu file JSON bị lỗi
@@ -60,8 +63,8 @@ class ThumbnailHandler:
             process_folder(tr_files, trash_dir, p_data["trash"])
 
             # Chỉ lưu 1 lần duy nhất sau khi 4 luồng đã cày xong
-            if changed: 
-                fresh_data = self.ui.main_app.get_project_data(self.ui.current_project_id)
+            if changed and project_id in self.ui.main_app.projects:
+                fresh_data = self.ui.main_app.get_project_data(project_id)
                 
                 for v_name, v_info in p_data["videos"].items():
                     if v_name in fresh_data.get("videos", {}):
@@ -75,13 +78,25 @@ class ThumbnailHandler:
                     else:
                         fresh_data["trash"][v_name] = v_info
                         
-                self.ui.main_app.save_project_data(self.ui.current_project_id, fresh_data)
+                self.ui.main_app.save_project_data(project_id, fresh_data)
                 
         except Exception as e:
             print(f"Lỗi luồng Thumbnail ngầm: {e}")
             
         finally:
-            self.ui.main_app.root.after(0, lambda: self.ui._build_video_rows(broll_dir, trash_dir, act_files, tr_files, p_data))
+            if project_id in self.ui.main_app.projects:
+                self.ui.main_app.root.after(
+                    0,
+                    lambda: self.ui._build_video_rows(
+                        project_id,
+                        broll_dir,
+                        trash_dir,
+                        act_files,
+                        tr_files,
+                        p_data,
+                        render_request_id,
+                    ),
+                )
 
     # ------------------------------------------------------------------
     # CÁC HÀM XỬ LÝ LÕI BẰNG FFMPEG (ĐÃ TỐI ƯU HÓA CARD ĐỒ HỌA)

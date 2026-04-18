@@ -22,6 +22,14 @@ class BRollTab:
         self.desc_entries = {} 
         self.thumb_labels = {}  # [MỚI] Dictionary lưu thumbnail labels
         self.product_link_entries = []
+        self.audio_vars = {}
+        self.active_page = 1
+        self.trash_page = 1
+        self.items_per_page = 30
+        self.page_size_var = tk.StringVar(master=self.parent, value=str(self.items_per_page))
+        self.filtered_act_files = []
+        self.filtered_tr_files = []
+        self.render_request_id = 0
         
         # [MỚI] Biến lưu trữ trạng thái Checkbox
         self.check_vars_act = {} # Checkbox tab Đang dùng
@@ -74,10 +82,14 @@ class BRollTab:
         # --- BẢNG ĐIỀU KHIỂN CHUNG ---
         control_panel = tk.Frame(self.right_frame, bg="#f4f6f9")
         control_panel.pack(fill="x", pady=(0, 10))
+        control_panel.columnconfigure(0, weight=1, uniform="tab1-top-panels")
+        control_panel.columnconfigure(1, weight=1, uniform="tab1-top-panels")
+        control_panel.columnconfigure(2, weight=1, uniform="tab1-top-panels")
+        control_panel.rowconfigure(0, weight=1)
 
         # 1. KHUNG QUẢN LÝ VOICE
         fr_voice = tk.LabelFrame(control_panel, text=" 🎙️ Danh Sách Voice ", font=("Arial", 10, "bold"), bg="#ffffff", padx=10, pady=5)
-        fr_voice.pack(side="left", fill="both", expand=True, padx=(0, 5))
+        fr_voice.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
         
         # [NÂNG CẤP] Bảng Treeview rộng rãi, có chia cột rõ ràng
         self.tree_voices = ttk.Treeview(fr_voice, columns=("name", "usage"), show="headings", height=8)
@@ -103,7 +115,7 @@ class BRollTab:
 
         # 2. KHUNG CÔNG CỤ CẢNH TRÁM
         fr_tools = tk.LabelFrame(control_panel, text=" 🛠️ Quản Lý Cảnh Trám ", font=("Arial", 10, "bold"), bg="#ffffff", padx=10, pady=5)
-        fr_tools.pack(side="right", fill="both", expand=True, padx=(5, 0))
+        fr_tools.grid(row=0, column=1, sticky="nsew", padx=5)
 
         self.btn_add_broll = tk.Button(fr_tools, text="📥 Nạp Cảnh Trám", bg="#16a085", fg="white", font=("Arial", 10, "bold"), command=self.import_broll, height=2)
         self.btn_add_broll.pack(fill="x", padx=10, pady=(5, 10))
@@ -150,14 +162,14 @@ class BRollTab:
 
         # [MỚI] KHUNG THÔNG TIN SẢN PHẨM / LINK SHOPEE
         fr_product_info = tk.LabelFrame(
-            self.right_frame,
+            control_panel,
             text=" Thông tin Shopee & Quản lý Job Hàng Loạt ",
             font=("Arial", 10, "bold"),
             bg="#ffffff",
             padx=12,
             pady=8,
         )
-        fr_product_info.pack(fill="x", pady=(0, 10))
+        fr_product_info.grid(row=0, column=2, sticky="nsew", padx=(5, 0))
 
         row_name = tk.Frame(fr_product_info, bg="#ffffff")
         row_name.pack(fill="x", pady=(0, 6))
@@ -167,7 +179,7 @@ class BRollTab:
             bg="#ffffff",
             fg="#8e44ad",
             font=("Arial", 10, "bold"),
-            width=18,
+            width=14,
             anchor="w",
         ).pack(side="left")
         self.ent_product_name = tk.Entry(row_name, font=("Arial", 10))
@@ -175,15 +187,17 @@ class BRollTab:
         self.ent_product_name.bind("<KeyRelease>", self._on_product_info_change)
 
         self.product_link_entries = []
+        links_column = tk.Frame(fr_product_info, bg="#ffffff")
+        links_column.pack(fill="x", expand=True)
         for idx in range(6):
-            row_link = tk.Frame(fr_product_info, bg="#ffffff")
+            row_link = tk.Frame(links_column, bg="#ffffff")
             row_link.pack(fill="x", pady=2)
             tk.Label(
                 row_link,
                 text=f"Link sản phẩm {idx + 1}:",
                 bg="#ffffff",
                 font=("Arial", 10),
-                width=18,
+                width=14,
                 anchor="w",
             ).pack(side="left")
             ent_link = tk.Entry(row_link, font=("Arial", 10))
@@ -205,7 +219,18 @@ class BRollTab:
         tk.Label(bulk_fr, text="🔍 Tìm tên:", font=("Arial", 9, "bold"), bg="#dfe6e9").pack(side="left", padx=(20, 5))
         self.ent_search = tk.Entry(bulk_fr, width=25, font=("Arial", 10))
         self.ent_search.pack(side="left")
-        self.ent_search.bind("<KeyRelease>", lambda e: self.render_video_list()) # Gõ phím là tự động lọc luôn
+        self.ent_search.bind("<KeyRelease>", self._on_search_change) # Gõ phím là tự động lọc luôn
+
+        tk.Label(bulk_fr, text="Mỗi trang:", font=("Arial", 9, "bold"), bg="#dfe6e9").pack(side="left", padx=(15, 5))
+        self.cmb_page_size = ttk.Combobox(
+            bulk_fr,
+            width=5,
+            state="readonly",
+            values=("30", "50", "100"),
+            textvariable=self.page_size_var,
+        )
+        self.cmb_page_size.pack(side="left")
+        self.cmb_page_size.bind("<<ComboboxSelected>>", self._on_page_size_change)
         
         self.btn_bulk_delete = tk.Button(bulk_fr, text="❌ XÓA VĨNH VIỄN", bg="#ff7675", fg="white", font=("Arial", 8, "bold"), command=self.bulk_delete_forever)
         self.btn_bulk_delete.pack(side="right", padx=5)
@@ -223,9 +248,23 @@ class BRollTab:
         self.broll_nb.add(self.tab_active, text=" ✅ Cảnh Đang Dùng ")
         self.broll_nb.add(self.tab_trash, text=" 🗑️ Đã Xóa (Thùng Rác) ")
 
+        self.active_pagination_fr = tk.Frame(self.tab_active, bg="#fdfefe", padx=10, pady=6)
+        self.active_pagination_fr.pack(fill="x")
+        self.lbl_act_page_info = tk.Label(self.active_pagination_fr, text=f"0 cảnh | {self.items_per_page} cảnh/trang", bg="#fdfefe", fg="#34495e", font=("Arial", 9, "bold"))
+        self.lbl_act_page_info.pack(side="left")
+        self.btn_act_next = tk.Button(self.active_pagination_fr, text="Sau ▶", width=8, font=("Arial", 8, "bold"), command=lambda: self._change_page("active", 1))
+        self.btn_act_next.pack(side="right")
+        self.lbl_act_page_status = tk.Label(self.active_pagination_fr, text="Không có dữ liệu", bg="#fdfefe", fg="#7f8c8d", font=("Arial", 9))
+        self.lbl_act_page_status.pack(side="right", padx=8)
+        self.btn_act_prev = tk.Button(self.active_pagination_fr, text="◀ Trước", width=8, font=("Arial", 8, "bold"), command=lambda: self._change_page("active", -1))
+        self.btn_act_prev.pack(side="right")
+
+        active_canvas_wrapper = tk.Frame(self.tab_active, bg="#fdfefe")
+        active_canvas_wrapper.pack(fill="both", expand=True)
+
         # Canvas Tab Active
-        self.canvas_act = tk.Canvas(self.tab_active, bg="#fdfefe")
-        self.scroll_act = ttk.Scrollbar(self.tab_active, orient="vertical", command=self.canvas_act.yview)
+        self.canvas_act = tk.Canvas(active_canvas_wrapper, bg="#fdfefe")
+        self.scroll_act = ttk.Scrollbar(active_canvas_wrapper, orient="vertical", command=self.canvas_act.yview)
         self.frame_act = tk.Frame(self.canvas_act, bg="#fdfefe")
         self.frame_act.bind("<Configure>", lambda e: self.canvas_act.configure(scrollregion=self.canvas_act.bbox("all")))
         self.frame_act_window = self.canvas_act.create_window((0, 0), window=self.frame_act, anchor="nw")
@@ -234,9 +273,23 @@ class BRollTab:
         self.canvas_act.pack(side="left", fill="both", expand=True)
         self.scroll_act.pack(side="right", fill="y")
 
+        self.trash_pagination_fr = tk.Frame(self.tab_trash, bg="#fdfefe", padx=10, pady=6)
+        self.trash_pagination_fr.pack(fill="x")
+        self.lbl_tr_page_info = tk.Label(self.trash_pagination_fr, text=f"0 cảnh | {self.items_per_page} cảnh/trang", bg="#fdfefe", fg="#34495e", font=("Arial", 9, "bold"))
+        self.lbl_tr_page_info.pack(side="left")
+        self.btn_tr_next = tk.Button(self.trash_pagination_fr, text="Sau ▶", width=8, font=("Arial", 8, "bold"), command=lambda: self._change_page("trash", 1))
+        self.btn_tr_next.pack(side="right")
+        self.lbl_tr_page_status = tk.Label(self.trash_pagination_fr, text="Không có dữ liệu", bg="#fdfefe", fg="#7f8c8d", font=("Arial", 9))
+        self.lbl_tr_page_status.pack(side="right", padx=8)
+        self.btn_tr_prev = tk.Button(self.trash_pagination_fr, text="◀ Trước", width=8, font=("Arial", 8, "bold"), command=lambda: self._change_page("trash", -1))
+        self.btn_tr_prev.pack(side="right")
+
+        trash_canvas_wrapper = tk.Frame(self.tab_trash, bg="#fdfefe")
+        trash_canvas_wrapper.pack(fill="both", expand=True)
+
         # Canvas Tab Trash
-        self.canvas_tr = tk.Canvas(self.tab_trash, bg="#fdfefe")
-        self.scroll_tr = ttk.Scrollbar(self.tab_trash, orient="vertical", command=self.canvas_tr.yview)
+        self.canvas_tr = tk.Canvas(trash_canvas_wrapper, bg="#fdfefe")
+        self.scroll_tr = ttk.Scrollbar(trash_canvas_wrapper, orient="vertical", command=self.canvas_tr.yview)
         self.frame_tr = tk.Frame(self.canvas_tr, bg="#fdfefe")
         self.frame_tr.bind("<Configure>", lambda e: self.canvas_tr.configure(scrollregion=self.canvas_tr.bbox("all")))
         self.frame_tr_window = self.canvas_tr.create_window((0, 0), window=self.frame_tr, anchor="nw")
@@ -255,6 +308,8 @@ class BRollTab:
         # Chỉ bật lăn chuột khi rê chuột vào khu vực Notebook của Tab BRoll
         self.broll_nb.bind("<Enter>", _bind_mouse)
         self.broll_nb.bind("<Leave>", _unbind_mouse)
+        self._update_pagination_ui("active", 0, 1, 1)
+        self._update_pagination_ui("trash", 0, 1, 1)
         self.refresh_project_list()
 
     # =========================================================
@@ -356,6 +411,58 @@ class BRollTab:
         except Exception:
             pass
 
+    def _on_search_change(self, event=None):
+        self.save_all_descriptions()
+        self.render_video_list(reset_pages=True)
+
+    def _on_page_size_change(self, event=None):
+        self.save_all_descriptions()
+        try:
+            self.items_per_page = max(1, int(self.page_size_var.get()))
+        except (TypeError, ValueError):
+            self.items_per_page = 30
+            self.page_size_var.set(str(self.items_per_page))
+        self.render_video_list(reset_pages=True)
+
+    def _get_paginated_files(self, files_list, current_page):
+        per_page = max(1, self.items_per_page)
+        total_items = len(files_list)
+        total_pages = max(1, (total_items + per_page - 1) // per_page) if total_items else 1
+        current_page = min(max(1, current_page), total_pages)
+        start_index = (current_page - 1) * per_page
+        end_index = start_index + per_page
+        return files_list[start_index:end_index], current_page, total_pages, total_items
+
+    def _update_pagination_ui(self, tab_name, total_items, current_page, total_pages):
+        if tab_name == "active":
+            count_label = self.lbl_act_page_info
+            status_label = self.lbl_act_page_status
+            prev_button = self.btn_act_prev
+            next_button = self.btn_act_next
+        else:
+            count_label = self.lbl_tr_page_info
+            status_label = self.lbl_tr_page_status
+            prev_button = self.btn_tr_prev
+            next_button = self.btn_tr_next
+
+        count_label.config(text=f"{total_items} cảnh | {self.items_per_page} cảnh/trang")
+        status_label.config(text=f"Trang {current_page}/{total_pages}" if total_items else "Không có dữ liệu")
+        prev_button.config(state="normal" if total_items and current_page > 1 else "disabled")
+        next_button.config(state="normal" if total_items and current_page < total_pages else "disabled")
+
+    def _change_page(self, tab_name, delta):
+        self.save_all_descriptions()
+        if tab_name == "active":
+            self.active_page = max(1, self.active_page + delta)
+        else:
+            self.trash_page = max(1, self.trash_page + delta)
+        self.render_video_list()
+
+    def _is_render_request_current(self, project_id, render_request_id):
+        if render_request_id is None:
+            return project_id == self.current_project_id
+        return project_id == self.current_project_id and render_request_id == self.render_request_id
+
 
     def refresh_project_list(self):
         for item in self.tree_proj.get_children(): self.tree_proj.delete(item)
@@ -384,7 +491,7 @@ class BRollTab:
             broll_dir = os.path.join(self.main_app.get_proj_dir(self.current_project_id), "Broll")
             os.makedirs(broll_dir, exist_ok=True)
             for f in files: shutil.copy2(f, os.path.join(broll_dir, os.path.basename(f)))
-            self.render_video_list()
+            self.render_video_list(reset_pages=True)
 
     def load_voices(self):
         # Dọn sạch bảng cũ
@@ -555,7 +662,7 @@ class BRollTab:
         self.current_project_id = next_project_id
         self.lbl_proj_name.config(text=self.main_app.projects[self.current_project_id]['name'])
         self.load_voices()
-        self.render_video_list()
+        self.render_video_list(reset_pages=True)
         # Đổi trạng thái nút bấm
         status = self.main_app.projects[self.current_project_id].get("status", "active")
         if status == "disabled":
@@ -582,12 +689,19 @@ class BRollTab:
             self.refresh_project_list()
             
             self.current_project_id = None
+            self.active_page = 1
+            self.trash_page = 1
+            self.filtered_act_files = []
+            self.filtered_tr_files = []
+            self.render_request_id += 1
             self.lbl_proj_name.config(text="Chưa chọn Project nào")
             for item in self.tree_voices.get_children(): self.tree_voices.delete(item)
             for widget in self.frame_act.winfo_children(): widget.destroy()
             for widget in self.frame_tr.winfo_children(): widget.destroy()
             self.txt_context.delete("1.0", tk.END)
             self.ent_product_name.delete(0, tk.END)
+            self._update_pagination_ui("active", 0, 1, 1)
+            self._update_pagination_ui("trash", 0, 1, 1)
             for entry in self.product_link_entries:
                 entry.delete(0, tk.END)
 
@@ -677,19 +791,36 @@ class BRollTab:
         messagebox.showinfo("Thành công", "Đã đánh tráo file mượt mà!")
         self.render_video_list()
 
-    def render_video_list(self):
+    def render_video_list(self, reset_pages=False):
+        if reset_pages:
+            self.active_page = 1
+            self.trash_page = 1
+
+        self.render_request_id += 1
+        current_request_id = self.render_request_id
+
         for w in self.frame_act.winfo_children(): w.destroy()
         for w in self.frame_tr.winfo_children(): w.destroy()
         self.photo_refs.clear()
         self.desc_entries.clear()
+        self.thumb_labels.clear()
+        self.audio_vars.clear()
         self.check_vars_act.clear()
         self.check_vars_tr.clear()
         self.canvas_act.configure(scrollregion=(0, 0, 0, 0))
         self.canvas_tr.configure(scrollregion=(0, 0, 0, 0))
         self.canvas_act.yview_moveto(0)
         self.canvas_tr.yview_moveto(0)
+        self.filtered_act_files = []
+        self.filtered_tr_files = []
+        self._update_pagination_ui("active", 0, 1, 1)
+        self._update_pagination_ui("trash", 0, 1, 1)
 
-        if not self.current_project_id: return
+        if not self.current_project_id:
+            self.update_missing_desc_count()
+            return
+
+        project_id = self.current_project_id
         proj_dir = self.main_app.get_proj_dir(self.current_project_id)
         broll_dir = os.path.join(proj_dir, "Broll")
         trash_dir = os.path.join(proj_dir, "Broll_Trash")
@@ -700,37 +831,67 @@ class BRollTab:
         keyword = self.ent_search.get().strip().lower() if hasattr(self, 'ent_search') else ""
 
         # Đã thêm điều kiện: keyword in f.lower() để lọc file
-        act_files = sorted(
+        all_act_files = sorted(
             [f for f in os.listdir(broll_dir) if f.lower().endswith(('.mp4', '.mov')) and keyword in f.lower()],
             key=lambda x: os.path.getmtime(os.path.join(broll_dir, x)),
             reverse=True
         )
         
-        tr_files = sorted(
+        all_tr_files = sorted(
             [f for f in os.listdir(trash_dir) if f.lower().endswith(('.mp4', '.mov')) and keyword in f.lower()],
             key=lambda x: os.path.getmtime(os.path.join(trash_dir, x)),
             reverse=True
         )
 
-        if not act_files and not tr_files: 
-            tk.Label(self.frame_act, text="Không tìm thấy cảnh nào phù hợp.", fg="#7f8c8d", font=("Arial", 10, "italic")).pack(pady=20)
+        self.filtered_act_files = all_act_files
+        self.filtered_tr_files = all_tr_files
+
+        act_files, self.active_page, act_total_pages, act_total = self._get_paginated_files(all_act_files, self.active_page)
+        tr_files, self.trash_page, tr_total_pages, tr_total = self._get_paginated_files(all_tr_files, self.trash_page)
+
+        self._update_pagination_ui("active", act_total, self.active_page, act_total_pages)
+        self._update_pagination_ui("trash", tr_total, self.trash_page, tr_total_pages)
+
+        if act_total == 0:
+            empty_active_text = "Không tìm thấy cảnh nào phù hợp." if keyword else "Chưa có cảnh nào trong danh sách đang dùng."
+            tk.Label(self.frame_act, text=empty_active_text, fg="#7f8c8d", font=("Arial", 10, "italic")).pack(pady=20)
+
+        if tr_total == 0:
+            empty_trash_text = "Không có cảnh nào trong thùng rác khớp từ khóa." if keyword else "Thùng rác đang trống."
+            tk.Label(self.frame_tr, text=empty_trash_text, fg="#7f8c8d", font=("Arial", 10, "italic")).pack(pady=20)
+
+        self.update_missing_desc_count()
+
+        if not act_files and not tr_files:
             return
 
-        tk.Label(self.frame_act, text="⏳ Đang load ảnh...", fg="#e67e22").pack(pady=10)
+        if act_files:
+            tk.Label(self.frame_act, text="⏳ Đang load ảnh...", fg="#e67e22").pack(pady=10)
+        if tr_files:
+            tk.Label(self.frame_tr, text="⏳ Đang load ảnh...", fg="#e67e22").pack(pady=10)
         
-        threading.Thread(target=self.thumb_handler.generate, args=(broll_dir, trash_dir, act_files, tr_files), daemon=True).start()
+        threading.Thread(
+            target=self.thumb_handler.generate,
+            args=(project_id, broll_dir, trash_dir, act_files, tr_files, current_request_id),
+            daemon=True,
+        ).start()
 
-    def _build_video_rows(self, broll_dir, trash_dir, act_files, tr_files, p_data):
+    def _build_video_rows(self, project_id, broll_dir, trash_dir, act_files, tr_files, p_data, render_request_id=None):
+        if not self._is_render_request_current(project_id, render_request_id):
+            return
+
         for w in self.frame_act.winfo_children(): w.destroy()
         for w in self.frame_tr.winfo_children(): w.destroy()
         
         self.check_vars_act.clear()
         self.check_vars_tr.clear()
         self.thumb_labels.clear()  # [MỚI] Clear thumbnail labels
+        self.audio_vars.clear()
         
         saved_vids = p_data.get('videos', {})
-        if not act_files: 
-            pass # Đã xử lý label ở hàm trên
+        if not act_files:
+            active_empty_text = "Không tìm thấy cảnh nào phù hợp." if self.ent_search.get().strip() else "Chưa có cảnh nào trong danh sách đang dùng."
+            tk.Label(self.frame_act, text=active_empty_text, fg="#7f8c8d", font=("Arial", 10, "italic")).pack(pady=20)
         else:
             header_fr = tk.Frame(self.frame_act, bg="#bdc3c7", pady=5)
             header_fr.pack(fill="x", padx=10, pady=(5, 0))
@@ -827,7 +988,6 @@ class BRollTab:
             col4 = tk.Frame(row_fr, bg="#ffffff")
             col4.grid(row=0, column=4, sticky="nw", padx=5, pady=10)
             keep_audio_var = tk.BooleanVar(value=saved_vids.get(vid_name, {}).get('keep_audio', False))
-            if not hasattr(self, 'audio_vars'): self.audio_vars = {}
             self.audio_vars[vid_name] = keep_audio_var
             tk.Checkbutton(col4, text="🔊 Bật Âm", variable=keep_audio_var, bg="#ffffff", font=("Arial", 9, "bold"), fg="#c0392b", command=self.save_all_descriptions).pack(anchor="nw")
             tk.Label(col4, text="(Giữ tiếng gốc)", bg="#ffffff", font=("Arial", 8, "italic"), fg="#7f8c8d").pack(anchor="nw", padx=20)
@@ -837,8 +997,9 @@ class BRollTab:
             tk.Label(row_fr, text=f"{usage} lần", font=("Arial", 16, "bold"), fg=usage_color, bg="#ffffff").grid(row=0, column=5, sticky="e", padx=15)
 
         saved_trash = p_data.get('trash', {})
-        if not tr_files: 
-            pass # Đã xử lý label ở trên
+        if not tr_files:
+            trash_empty_text = "Không có cảnh nào trong thùng rác khớp từ khóa." if self.ent_search.get().strip() else "Thùng rác đang trống."
+            tk.Label(self.frame_tr, text=trash_empty_text, fg="#7f8c8d", font=("Arial", 10, "italic")).pack(pady=20)
         else:
             header_tr = tk.Frame(self.frame_tr, bg="#eab5b5", pady=5)
             header_tr.pack(fill="x", padx=10, pady=(5, 0))
@@ -892,6 +1053,7 @@ class BRollTab:
             tk.Label(row_fr, text=saved_trash.get(vid_name, {}).get("description", "(Trống)"), font=("Arial", 10), bg="#fdfefe", anchor="nw", justify="left", wraplength=600, relief="solid", bd=1, padx=5, pady=5).grid(row=0, column=3, sticky="nsew", padx=5)
 
         self.parent.update_idletasks()
+        self._sync_canvas_window_widths()
         self.canvas_act.configure(scrollregion=self.canvas_act.bbox("all"))
         self.canvas_tr.configure(scrollregion=self.canvas_tr.bbox("all"))
         self._bind_mousewheel_to_all_children(self.frame_act)
@@ -1028,16 +1190,31 @@ class BRollTab:
 
     def update_missing_desc_count(self):
         """ Đếm xem còn bao nhiêu ô chưa gõ chữ """
+        if not self.current_project_id:
+            self.lbl_missing_desc.config(text="Chưa có cảnh để điền mô tả", fg="#7f8c8d")
+            return
+
+        p_data = self.main_app.get_project_data(self.current_project_id)
+        saved_videos = p_data.get("videos", {})
+        target_names = self.filtered_act_files if self.filtered_act_files is not None else list(saved_videos.keys())
+
         empty_count = 0
-        for vid_name, txt_widget in self.desc_entries.items():
-            text = txt_widget.get("1.0", tk.END).strip()
+        total_count = len(target_names)
+
+        for vid_name in target_names:
+            if vid_name in self.desc_entries:
+                text = self.desc_entries[vid_name].get("1.0", tk.END).strip()
+            else:
+                text = saved_videos.get(vid_name, {}).get("description", "").strip()
             if not text:
                 empty_count += 1
-                
-        if empty_count > 0:
-            self.lbl_missing_desc.config(text=f"⚠️ Còn {empty_count} cảnh chưa có mô tả", fg="#c0392b")
+
+        if total_count == 0:
+            self.lbl_missing_desc.config(text="Chưa có cảnh để điền mô tả", fg="#7f8c8d")
+        elif empty_count > 0:
+            self.lbl_missing_desc.config(text=f"⚠️ Thiếu mô tả {empty_count}/{total_count} cảnh", fg="#c0392b")
         else:
-            self.lbl_missing_desc.config(text="✅ Đã điền 100% mô tả", fg="#27ae60")
+            self.lbl_missing_desc.config(text=f"✅ Đã điền 100% mô tả ({total_count} cảnh)", fg="#27ae60")
 
     def refresh_single_thumbnail(self, vid_name):
         """ Ép buộc tạo lại ảnh bìa 5 khung hình cho 1 video cụ thể """
