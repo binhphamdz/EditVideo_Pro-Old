@@ -6,6 +6,7 @@ import json
 import threading # [MỚI] IMPORT THƯ VIỆN KHÓA
 from datetime import datetime
 from PIL import Image, ImageDraw, ImageFont
+from shopee_export import export_rendered_video_to_shopee_files
 
 # =======================================================
 # [MỚI] TẠO Ổ KHÓA TOÀN CỤC BẢO VỆ FILE EXCEL (CSV)
@@ -392,3 +393,7 @@ def render_faceless_video(voice_name, voice_path, timeline, proj_dir, proj_name,
     with csv_write_lock:
         with open(excel_log_file, 'a', encoding='utf-8-sig', newline='') as f:
             csv.writer(f).writerow([datetime.now().strftime('%d/%m/%Y %H:%M'), proj_name, voice_name, out_file, "Chưa chuyển"])
+
+    exported_to_shopee, shopee_export_path = export_rendered_video_to_shopee_files(proj_dir, out_file, config=config, default_status="Chưa chuyển")
+    if exported_to_shopee:
+        log_cb(f"[{voice_name}] ✅ Đã ghi dữ liệu Shopee vào: {shopee_export_path}")

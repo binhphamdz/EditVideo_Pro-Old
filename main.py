@@ -46,6 +46,8 @@ ffmpeg_reader.FFMPEG_VideoReader.__del__ = safe_del
 from tab1_broll import BRollTab
 from tab2_modules import FacelessTab
 from tab4_manager import ManagerTab
+from tab5_phone import PhoneManagerTab
+from tab11_auto_post import AutoPostTab
 # from tab5_tiktok import TikTokTab  # [ĐÃ XÓA]
 from tab6_subtitle import SubtitleTab  
 from tab7_script import ScriptTab  
@@ -169,7 +171,14 @@ class MainApp:
                                 return data
                         except: pass
 
-        return {"videos": {}, "trash": {}, "timeline": []}
+        return {
+            "videos": {},
+            "trash": {},
+            "timeline": [],
+            "product_context": "",
+            "product_name": "",
+            "product_links": ["", "", "", "", "", ""],
+        }
 
     # =======================================================
     # [NÂNG CẤP 3] - GHI DATA CHÍNH CHU TRỌN BỘ Ổ KHÓA + BACKUP
@@ -205,14 +214,20 @@ class MainApp:
         self.frame_tab1 = tk.Frame(self.notebook, bg="#f4f6f9")
         self.frame_tab2 = tk.Frame(self.notebook, bg="#f4f6f9")
         self.frame_tab4 = tk.Frame(self.notebook, bg="#f4f6f9") 
+        self.frame_tab5 = tk.Frame(self.notebook, bg="#f4f6f9")
+        self.frame_tab11 = tk.Frame(self.notebook, bg="#f4f6f9")
         
         self.notebook.add(self.frame_tab1, text=" 📂KHO CẢNH TRÁM ")
         self.notebook.add(self.frame_tab2, text=" 🚀 EDIT VIDEO ĐA LUỒNG ")
         self.notebook.add(self.frame_tab4, text=" 📊 QUẢN LÝ VIDEO ")
+        self.notebook.add(self.frame_tab5, text=" 📱 QUẢN LÝ ĐIỆN THOẠI ")
+        self.notebook.add(self.frame_tab11, text=" 🚜 AUTO ĐĂNG SHOPEE ")
         
         self.tab1 = BRollTab(self.frame_tab1, self)
         self.tab2 = FacelessTab(self.frame_tab2, self)
         self.tab4 = ManagerTab(self.frame_tab4, self) 
+        self.tab5 = PhoneManagerTab(self.frame_tab5, self)
+        self.tab11 = AutoPostTab(self.frame_tab11, self)
 
         # [ĐÃ XÓA] TikTok Upload Tab
 
@@ -250,6 +265,10 @@ class MainApp:
         self.tab2.update_combo_projects()
         self.tab1.refresh_project_list()
         self.tab4.load_excel_data() 
+        if hasattr(self, 'tab5'):
+            self.tab5.on_tab_activated()
+        if hasattr(self, 'tab11'):
+            self.tab11.on_tab_activated()
 
     # =================================================================
     # HÀM CẦU NỐI (PROXY) TỪ TAB 8 SANG BOT MANAGER

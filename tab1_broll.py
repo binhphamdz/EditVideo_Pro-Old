@@ -21,6 +21,7 @@ class BRollTab:
         self.photo_refs = {} 
         self.desc_entries = {} 
         self.thumb_labels = {}  # [MỚI] Dictionary lưu thumbnail labels
+        self.product_link_entries = []
         
         # [MỚI] Biến lưu trữ trạng thái Checkbox
         self.check_vars_act = {} # Checkbox tab Đang dùng
@@ -146,6 +147,49 @@ class BRollTab:
         
         # Nút xóa ảnh mẫu
         tk.Button(fr_ref, text="❌", bg="#e74c3c", fg="white", font=("Arial", 8), command=self.clear_ref_images).pack(side="right")
+
+        # [MỚI] KHUNG THÔNG TIN SẢN PHẨM / LINK SHOPEE
+        fr_product_info = tk.LabelFrame(
+            self.right_frame,
+            text=" Thông tin Shopee & Quản lý Job Hàng Loạt ",
+            font=("Arial", 10, "bold"),
+            bg="#ffffff",
+            padx=12,
+            pady=8,
+        )
+        fr_product_info.pack(fill="x", pady=(0, 10))
+
+        row_name = tk.Frame(fr_product_info, bg="#ffffff")
+        row_name.pack(fill="x", pady=(0, 6))
+        tk.Label(
+            row_name,
+            text="Tên sản phẩm:",
+            bg="#ffffff",
+            fg="#8e44ad",
+            font=("Arial", 10, "bold"),
+            width=18,
+            anchor="w",
+        ).pack(side="left")
+        self.ent_product_name = tk.Entry(row_name, font=("Arial", 10))
+        self.ent_product_name.pack(side="left", fill="x", expand=True)
+        self.ent_product_name.bind("<KeyRelease>", self._on_product_info_change)
+
+        self.product_link_entries = []
+        for idx in range(6):
+            row_link = tk.Frame(fr_product_info, bg="#ffffff")
+            row_link.pack(fill="x", pady=2)
+            tk.Label(
+                row_link,
+                text=f"Link sản phẩm {idx + 1}:",
+                bg="#ffffff",
+                font=("Arial", 10),
+                width=18,
+                anchor="w",
+            ).pack(side="left")
+            ent_link = tk.Entry(row_link, font=("Arial", 10))
+            ent_link.pack(side="left", fill="x", expand=True)
+            ent_link.bind("<KeyRelease>", self._on_product_info_change)
+            self.product_link_entries.append(ent_link)
 
 
         # --- [MỚI] THANH QUẢN LÝ HÀNG LOẠT & TÌM KIẾM ---
@@ -475,14 +519,31 @@ class BRollTab:
             pid = datetime.now().strftime("%Y%m%d%H%M%S")
             self.main_app.projects[pid] = {"name": proj_name, "created_at": datetime.now().timestamp()}
             self.main_app.save_projects()
-            self.main_app.save_project_data(pid, {"videos": {}, "trash": {}, "timeline": []})
+            self.main_app.save_project_data(
+                pid,
+                {
+                    "videos": {},
+                    "trash": {},
+                    "timeline": [],
+                    "product_context": "",
+                    "product_name": "",
+                    "product_links": ["", "", "", "", "", ""],
+                },
+            )
             self.refresh_project_list()
             self.tree_proj.selection_set(pid)
 
     def on_select_project(self, event):
         selected = self.tree_proj.selection()
         if not selected: return
-        self.current_project_id = selected[0]
+        next_project_id = selected[0]
+
+        if self.current_project_id and self.current_project_id != next_project_id:
+            self.save_all_descriptions()
+            self.save_project_context()
+            self.save_product_info()
+
+        self.current_project_id = next_project_id
         self.lbl_proj_name.config(text=self.main_app.projects[self.current_project_id]['name'])
         self.load_voices()
         self.render_video_list()
@@ -496,6 +557,7 @@ class BRollTab:
         p_data = self.main_app.get_project_data(self.current_project_id)
         self.txt_context.delete("1.0", tk.END)
         self.txt_context.insert("1.0", p_data.get("product_context", ""))
+        self._load_product_info(p_data)
         # Load ảnh mẫu ra UI
         ref1 = p_data.get("ref_img_1", "")
         ref2 = p_data.get("ref_img_2", "")
@@ -515,6 +577,10 @@ class BRollTab:
             for item in self.tree_voices.get_children(): self.tree_voices.delete(item)
             for widget in self.frame_act.winfo_children(): widget.destroy()
             for widget in self.frame_tr.winfo_children(): widget.destroy()
+            self.txt_context.delete("1.0", tk.END)
+            self.ent_product_name.delete(0, tk.END)
+            for entry in self.product_link_entries:
+                entry.delete(0, tk.END)
 
     def move_to_trash(self, vid_name, refresh=True):
         self.save_all_descriptions() 
@@ -861,6 +927,32 @@ class BRollTab:
         p_data["product_context"] = self.txt_context.get("1.0", tk.END).strip()
         
         # 3. Lưu đè data (Hàm save này cũng tự có khóa bảo vệ bên main.py rồi)
+        self.main_app.save_project_data(self.current_project_id, p_data)
+
+    def _load_product_info(self, p_data):
+        self.ent_product_name.delete(0, tk.END)
+        self.ent_product_name.insert(0, p_data.get("product_name", ""))
+
+        links = p_data.get("product_links", [])
+        if len(links) < 6:
+            links = list(links) + [""] * (6 - len(links))
+
+        for idx, entry in enumerate(self.product_link_entries):
+            entry.delete(0, tk.END)
+            entry.insert(0, links[idx] if idx < len(links) else "")
+
+    def _on_product_info_change(self, event):
+        if hasattr(self, "timer_product_info"):
+            self.parent.after_cancel(self.timer_product_info)
+        self.timer_product_info = self.parent.after(800, self.save_product_info)
+
+    def save_product_info(self):
+        if not self.current_project_id:
+            return
+
+        p_data = self.main_app.get_project_data(self.current_project_id)
+        p_data["product_name"] = self.ent_product_name.get().strip()
+        p_data["product_links"] = [entry.get().strip() for entry in self.product_link_entries]
         self.main_app.save_project_data(self.current_project_id, p_data)
 
     def start_auto_tag(self):

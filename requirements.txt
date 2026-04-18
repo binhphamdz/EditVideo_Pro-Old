@@ -2,6 +2,7 @@
 moviepy==1.0.3
 pillow==10.0.0
 numpy==1.24.0
+opencv-python==4.13.0.92
 
 # AI & Language Services
 groq==0.9.0
@@ -18,9 +19,11 @@ beautifulsoup4==4.12.0
 pyTelegramBotAPI==4.15.0
 selenium==4.15.2
 webdriver-manager==4.0.1
+uiautomator2==3.2.9
 
 # Utils
 python-dotenv==1.0.0
+openpyxl==3.1.5
 
 # Optional: For better performance
 aiohttp==3.9.0
