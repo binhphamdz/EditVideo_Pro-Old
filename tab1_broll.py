@@ -6,12 +6,15 @@ import threading
 from datetime import datetime
 import subprocess
 import gc
+import re
+import unicodedata
 from PIL import Image, ImageTk
 
 # Gọi 2 thằng đệ ra làm việc
 from tab1_modules.thumbnail_maker import ThumbnailHandler
 from tab1_modules.ai_vision import AIVisionHandler
 from tab2_modules.ai_services import get_transcription
+from shopee_export import normalize_shopee_product_link
 
 class BRollTab:
     def __init__(self, parent, main_app):
@@ -30,6 +33,9 @@ class BRollTab:
         self.filtered_act_files = []
         self.filtered_tr_files = []
         self.render_request_id = 0
+        self.ai_task_states = {}
+        self.ai_task_counter = 0
+        self.voice_status_by_project = {}
         
         # [MỚI] Biến lưu trữ trạng thái Checkbox
         self.check_vars_act = {} # Checkbox tab Đang dùng
@@ -92,13 +98,15 @@ class BRollTab:
         fr_voice.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
         
         # [NÂNG CẤP] Bảng Treeview rộng rãi, có chia cột rõ ràng
-        self.tree_voices = ttk.Treeview(fr_voice, columns=("name", "usage"), show="headings", height=8)
+        self.tree_voices = ttk.Treeview(fr_voice, columns=("name", "usage", "status"), show="headings", height=8)
         self.tree_voices.heading("name", text="Tên Voice")
         self.tree_voices.heading("usage", text="Số Lần Dùng")
+        self.tree_voices.heading("status", text="Trạng Thái")
         
-        # Chỉnh độ rộng cột cho to ra
-        self.tree_voices.column("name", width=350, anchor="w")
-        self.tree_voices.column("usage", width=120, anchor="center")
+        # Thu gọn cột để cửa sổ thường vẫn nhìn thấy cụm nút thao tác
+        self.tree_voices.column("name", width=150, minwidth=120, anchor="w", stretch=True)
+        self.tree_voices.column("usage", width=120, minwidth=70, anchor="center", stretch=False)
+        self.tree_voices.column("status", width=190, minwidth=150, anchor="w", stretch=True)
         
         scroll_voice_tab1 = ttk.Scrollbar(fr_voice, orient="vertical", command=self.tree_voices.yview)
         self.tree_voices.configure(yscrollcommand=scroll_voice_tab1.set)
@@ -149,13 +157,13 @@ class BRollTab:
 
         self.btn_ref1 = tk.Button(fr_ref, text="🖼️ Ảnh Mẫu 1", bg="#f39c12", fg="white", font=("Arial", 8, "bold"), command=lambda: self.select_ref_image(1))
         self.btn_ref1.pack(side="left", padx=(0, 5))
-        self.lbl_ref1 = tk.Label(fr_ref, text="Chưa chọn", bg="#ffffff", font=("Arial", 8), fg="gray")
-        self.lbl_ref1.pack(side="left", fill="x", expand=True)
+        self.lbl_ref1 = tk.Label(fr_ref, text="Chưa chọn", bg="#ffffff", font=("Arial", 8), fg="gray", width=22, anchor="w")
+        self.lbl_ref1.pack(side="left", fill="x", expand=True, padx=(0, 4))
 
         self.btn_ref2 = tk.Button(fr_ref, text="🖼️ Ảnh Mẫu 2", bg="#f39c12", fg="white", font=("Arial", 8, "bold"), command=lambda: self.select_ref_image(2))
         self.btn_ref2.pack(side="left", padx=(5, 5))
-        self.lbl_ref2 = tk.Label(fr_ref, text="Chưa chọn", bg="#ffffff", font=("Arial", 8), fg="gray")
-        self.lbl_ref2.pack(side="left", fill="x", expand=True)
+        self.lbl_ref2 = tk.Label(fr_ref, text="Chưa chọn", bg="#ffffff", font=("Arial", 8), fg="gray", width=22, anchor="w")
+        self.lbl_ref2.pack(side="left", fill="x", expand=True, padx=(0, 4))
         
         # Nút xóa ảnh mẫu
         tk.Button(fr_ref, text="❌", bg="#e74c3c", fg="white", font=("Arial", 8), command=self.clear_ref_images).pack(side="right")
@@ -186,6 +194,20 @@ class BRollTab:
         self.ent_product_name.pack(side="left", fill="x", expand=True)
         self.ent_product_name.bind("<KeyRelease>", self._on_product_info_change)
 
+        row_stock = tk.Frame(fr_product_info, bg="#ffffff")
+        row_stock.pack(fill="x", pady=(0, 6))
+        self.var_shopee_out_of_stock = tk.BooleanVar(value=False)
+        tk.Checkbutton(
+            row_stock,
+            text="Hết hàng: không ghi vào file job Shopee",
+            variable=self.var_shopee_out_of_stock,
+            command=self.save_product_info,
+            bg="#ffffff",
+            fg="#c0392b",
+            font=("Arial", 9, "bold"),
+            activebackground="#ffffff",
+        ).pack(anchor="w")
+
         self.product_link_entries = []
         links_column = tk.Frame(fr_product_info, bg="#ffffff")
         links_column.pack(fill="x", expand=True)
@@ -203,6 +225,7 @@ class BRollTab:
             ent_link = tk.Entry(row_link, font=("Arial", 10))
             ent_link.pack(side="left", fill="x", expand=True)
             ent_link.bind("<KeyRelease>", self._on_product_info_change)
+            ent_link.bind("<FocusOut>", self._on_product_link_focus_out)
             self.product_link_entries.append(ent_link)
 
 
@@ -463,6 +486,95 @@ class BRollTab:
             return project_id == self.current_project_id
         return project_id == self.current_project_id and render_request_id == self.render_request_id
 
+    def _get_ai_task_key(self, project_id, vid_name):
+        return (project_id, vid_name)
+
+    def _get_ai_task_state(self, project_id, vid_name):
+        return self.ai_task_states.get(self._get_ai_task_key(project_id, vid_name))
+
+    def _clear_ai_task_state(self, project_id, vid_name, task_token=None):
+        key = self._get_ai_task_key(project_id, vid_name)
+        state = self.ai_task_states.get(key)
+        if not state:
+            return
+        if task_token is not None and state.get("token") != task_token:
+            return
+        self.ai_task_states.pop(key, None)
+
+    def _clear_ai_task_states_for_project(self, project_id):
+        keys_to_remove = [key for key in self.ai_task_states if key[0] == project_id]
+        for key in keys_to_remove:
+            self.ai_task_states.pop(key, None)
+
+    def _set_visible_description_text(self, project_id, vid_name, text):
+        if project_id != self.current_project_id:
+            return False
+
+        txt_widget = self.desc_entries.get(vid_name)
+        if not txt_widget:
+            return False
+
+        try:
+            txt_widget.delete("1.0", tk.END)
+            txt_widget.insert("1.0", text)
+            return True
+        except tk.TclError:
+            return False
+
+    def _is_transient_ai_message(self, text):
+        clean_text = (text or "").strip()
+        return clean_text.startswith("⏳ AI ") or clean_text.startswith("❌ ")
+
+    def _start_ai_task(self, project_id, vid_name, message):
+        self.ai_task_counter += 1
+        task_token = self.ai_task_counter
+        self.ai_task_states[self._get_ai_task_key(project_id, vid_name)] = {
+            "token": task_token,
+            "state": "running",
+            "message": message,
+        }
+        self._set_visible_description_text(project_id, vid_name, message)
+        return task_token
+
+    def _set_ai_task_error(self, project_id, vid_name, task_token, message):
+        state = self._get_ai_task_state(project_id, vid_name)
+        if not state or state.get("token") != task_token:
+            return
+
+        state["state"] = "error"
+        state["message"] = message
+        self._set_visible_description_text(project_id, vid_name, message)
+        self.update_missing_desc_count()
+
+    def _complete_ai_task(self, project_id, vid_name, task_token, description):
+        state = self._get_ai_task_state(project_id, vid_name)
+        if not state or state.get("token") != task_token:
+            return
+
+        self._clear_ai_task_state(project_id, vid_name, task_token)
+
+        if project_id not in self.main_app.projects:
+            return
+
+        clean_description = description.strip()
+        p_data = self.main_app.get_project_data(project_id)
+
+        if vid_name in p_data.get("videos", {}):
+            target_dict = p_data["videos"]
+        elif vid_name in p_data.get("trash", {}):
+            target_dict = p_data["trash"]
+        else:
+            p_data.setdefault("videos", {})
+            target_dict = p_data["videos"]
+
+        if vid_name not in target_dict or not isinstance(target_dict[vid_name], dict):
+            target_dict[vid_name] = {}
+
+        target_dict[vid_name]["description"] = clean_description
+        self.main_app.save_project_data(project_id, p_data)
+        self._set_visible_description_text(project_id, vid_name, clean_description)
+        self.update_missing_desc_count()
+
 
     def refresh_project_list(self):
         for item in self.tree_proj.get_children(): self.tree_proj.delete(item)
@@ -472,6 +584,87 @@ class BRollTab:
             # Hiện icon khóa nếu đang ẩn
             if pdata.get('status') == 'disabled': name = f"⏸️ {name} (Đã Ẩn)"
             self.tree_proj.insert("", "end", iid=pid, values=(name,))
+
+    def _get_voice_status_store(self, project_id):
+        return self.voice_status_by_project.setdefault(project_id, {})
+
+    def _get_voice_display_status(self, project_id, voice_name, p_data=None):
+        if not project_id:
+            return "Chưa bóc SRT"
+
+        status_store = self._get_voice_status_store(project_id)
+        if voice_name in status_store:
+            return status_store[voice_name]
+
+        if p_data is None:
+            p_data = self.main_app.get_project_data(project_id)
+
+        if voice_name in p_data.get("voice_srt_cache", {}):
+            return "✅ Đã xong"
+
+        return "⏳ Chờ bóc SRT"
+
+    def _refresh_voice_row(self, voice_name, project_id=None):
+        project_id = project_id or self.current_project_id
+        if not project_id or project_id != self.current_project_id:
+            return
+
+        p_data = self.main_app.get_project_data(project_id)
+        usage = p_data.get("voice_usage", {}).get(voice_name, 0)
+        status_text = self._get_voice_display_status(project_id, voice_name, p_data)
+        voice_path = os.path.join(self.main_app.get_proj_dir(project_id), "Voices", voice_name)
+
+        if not os.path.exists(voice_path):
+            if self.tree_voices.exists(voice_name):
+                self.tree_voices.delete(voice_name)
+            return
+
+        values = (voice_name, f"{usage} lần", status_text)
+        if self.tree_voices.exists(voice_name):
+            self.tree_voices.item(voice_name, values=values)
+        else:
+            self.tree_voices.insert("", "end", iid=voice_name, values=values)
+
+    def _set_voice_status(self, project_id, voice_name, status_text):
+        if not project_id or not voice_name:
+            return
+
+        self._get_voice_status_store(project_id)[voice_name] = status_text
+
+        if project_id == self.current_project_id:
+            self.main_app.root.after(0, lambda vn=voice_name, pid=project_id: self._refresh_voice_row(vn, pid))
+
+    def _clear_voice_status(self, project_id, voice_name):
+        if not project_id:
+            return
+
+        status_store = self._get_voice_status_store(project_id)
+        status_store.pop(voice_name, None)
+
+    def _parse_voice_log_status(self, msg):
+        clean_msg = str(msg or "").strip()
+        if not clean_msg:
+            return None, None
+
+        match = re.match(r"^\[([^\]]+)\]\s*(.+)$", clean_msg)
+        if match:
+            return match.group(1).strip(), match.group(2).strip()
+
+        match = re.match(r"^✅ Đã bóp SRT xong:\s*(.+)$", clean_msg)
+        if match:
+            return match.group(1).strip(), "✅ Đã xong"
+
+        match = re.match(r"^❌ Lỗi bóc SRT\s+([^:]+):\s*(.+)$", clean_msg)
+        if match:
+            voice_name, error_text = match.groups()
+            return voice_name.strip(), f"❌ {error_text.strip()}"
+
+        match = re.match(r"^✂️ Phát hiện câu test ở đầu\s+([^,]+),\s*cắt\s*([0-9.]+)s", clean_msg)
+        if match:
+            voice_name, seconds = match.groups()
+            return voice_name.strip(), f"✂️ Cắt câu test {seconds}s"
+
+        return None, None
 
     def rename_project(self):
         if not self.current_project_id: return
@@ -505,11 +698,15 @@ class BRollTab:
         # Đọc dữ liệu xem voice nào đã được dùng bao nhiêu lần
         p_data = self.main_app.get_project_data(self.current_project_id)
         voice_usage = p_data.get("voice_usage", {})
+        voice_files = sorted(
+            [f for f in os.listdir(voice_dir) if f.lower().endswith(('.mp3', '.wav', '.m4a'))],
+            key=str.lower,
+        )
         
-        for f in os.listdir(voice_dir):
-            if f.lower().endswith(('.mp3', '.wav', '.m4a')):
-                count = voice_usage.get(f, 0) # Lấy số lần dùng, mặc định là 0
-                self.tree_voices.insert("", "end", values=(f, f"{count} lần"))
+        for f in voice_files:
+            count = voice_usage.get(f, 0) # Lấy số lần dùng, mặc định là 0
+            status_text = self._get_voice_display_status(self.current_project_id, f, p_data)
+            self.tree_voices.insert("", "end", iid=f, values=(f, f"{count} lần", status_text))
 
     def play_voice(self):
         selected = self.tree_voices.selection()
@@ -534,19 +731,126 @@ class BRollTab:
                     if "voice_usage" in p_data and file_name in p_data["voice_usage"]:
                         del p_data["voice_usage"][file_name]
                         self.main_app.save_project_data(self.current_project_id, p_data)
+                    self._clear_voice_status(self.current_project_id, file_name)
                         
                 except Exception as e:
                     messagebox.showerror("Lỗi", f"Không thể xóa file: {e}")
             self.load_voices()
+
+    def _normalize_voice_marker_text(self, text):
+        normalized_text = unicodedata.normalize("NFD", str(text or ""))
+        normalized_text = "".join(ch for ch in normalized_text if unicodedata.category(ch) != "Mn")
+        normalized_text = normalized_text.lower()
+        normalized_text = re.sub(r"[^a-z0-9\s]", " ", normalized_text)
+        return re.sub(r"\s+", " ", normalized_text).strip()
+
+    def _parse_voice_timeline_text(self, timeline_text):
+        timeline_items = []
+        pattern = re.compile(r"\[\s*([0-9]+(?:\.[0-9]+)?)s\s*-\s*([0-9]+(?:\.[0-9]+)?)s\s*\]:\s*(.+)")
+        for line in (timeline_text or "").splitlines():
+            match = pattern.match(line.strip())
+            if not match:
+                continue
+
+            start_text, end_text, caption = match.groups()
+            timeline_items.append(
+                {
+                    "start": float(start_text),
+                    "end": float(end_text),
+                    "text": caption.strip(),
+                }
+            )
+        return timeline_items
+
+    def _detect_voice_test_intro_end(self, timeline_text):
+        target_text = self._normalize_voice_marker_text("Đây Là Giọng Nói Thử Của Tôi")
+        accumulated_text = ""
+
+        for idx, item in enumerate(self._parse_voice_timeline_text(timeline_text)):
+            if idx >= 4 or item["start"] > 12.0:
+                break
+
+            caption_text = self._normalize_voice_marker_text(item.get("text", ""))
+            if not caption_text:
+                continue
+
+            accumulated_text = f"{accumulated_text} {caption_text}".strip()
+            if accumulated_text.startswith(target_text):
+                return max(0.0, round(item["end"] + 0.05, 2))
+            if target_text.startswith(accumulated_text):
+                continue
+            return 0.0
+
+        return 0.0
+
+    def _trim_voice_file(self, voice_path, trim_start_seconds):
+        if trim_start_seconds <= 0:
+            return False
+
+        base_name, extension = os.path.splitext(voice_path)
+        temp_path = f"{base_name}.__trim__{extension}"
+        extension = extension.lower()
+
+        codec_args = []
+        if extension == ".mp3":
+            codec_args = ["-codec:a", "libmp3lame", "-q:a", "2"]
+        elif extension == ".wav":
+            codec_args = ["-codec:a", "pcm_s16le"]
+        elif extension == ".m4a":
+            codec_args = ["-codec:a", "aac", "-b:a", "192k"]
+
+        command = [
+            "ffmpeg",
+            "-y",
+            "-ss",
+            f"{trim_start_seconds:.2f}",
+            "-i",
+            voice_path,
+            *codec_args,
+            temp_path,
+        ]
+
+        creation_flags = 0x08000000 if os.name == 'nt' else 0
+        try:
+            subprocess.run(
+                command,
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=creation_flags,
+            )
+            os.replace(temp_path, voice_path)
+            return True
+        finally:
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+
+    def _transcribe_voice_with_auto_trim(self, project_id, voice_name, voice_path):
+        mode = self.main_app.config.get("boc_bang_mode", "groq")
+        log_cb = lambda msg, pid=project_id: self._log_extract(msg, project_id=pid)
+        srt_text = get_transcription(voice_path, voice_name, mode, self.main_app.config, log_cb)
+
+        trim_start_seconds = self._detect_voice_test_intro_end(srt_text)
+        if trim_start_seconds > 0:
+            self._log_extract(f"✂️ Phát hiện câu test ở đầu {voice_name}, cắt {trim_start_seconds:.2f}s...", project_id=project_id)
+            self._trim_voice_file(voice_path, trim_start_seconds)
+            srt_text = get_transcription(voice_path, voice_name, mode, self.main_app.config, log_cb)
+
+        return srt_text
+
     def import_voice(self):
         if not self.current_project_id: return
         files = filedialog.askopenfilenames(title="Chọn Voice", filetypes=[("Audio", "*.mp3 *.wav *.m4a")])
         if files:
+            project_id = self.current_project_id
             voice_dir = os.path.join(self.main_app.get_proj_dir(self.current_project_id), "Voices")
             os.makedirs(voice_dir, exist_ok=True)
             
             # 1. Gọi cuốn sổ JSON ra (Hàm get này tự có khóa bảo vệ bên main.py rồi)
-            p_data = self.main_app.get_project_data(self.current_project_id)
+            p_data = self.main_app.get_project_data(project_id)
             if "voice_usage" not in p_data: 
                 p_data["voice_usage"] = {}
             if "voice_srt_cache" not in p_data:  # [MỚI] Khởi tạo SRT cache
@@ -555,45 +859,55 @@ class BRollTab:
             for f in files: 
                 file_name = os.path.basename(f)
                 shutil.copy2(f, os.path.join(voice_dir, file_name))
+                self._set_voice_status(project_id, file_name, "⏳ Chờ bóc SRT")
                 
                 # Khai báo lính mới
                 if file_name not in p_data["voice_usage"]:
                     p_data["voice_usage"][file_name] = 0
             
             # 2. Lưu lại (Hàm save này cũng tự có khóa bảo vệ bên main.py rồi, gọi thẳng tay!)
-            self.main_app.save_project_data(self.current_project_id, p_data)
+            self.main_app.save_project_data(project_id, p_data)
             
             # 3. [MỚI] Bắt đầu extract SRT cho từng voice mới (chạy background)
             for f in files:
                 file_name = os.path.basename(f)
                 file_path = os.path.join(voice_dir, file_name)
-                thread = threading.Thread(target=self._extract_voice_srt_async, args=(file_name, file_path), daemon=True)
+                thread = threading.Thread(target=self._extract_voice_srt_async, args=(project_id, file_name, file_path), daemon=True)
                 thread.start()
                 
             self.load_voices()
     
-    def _extract_voice_srt_async(self, voice_name, voice_path):
+    def _extract_voice_srt_async(self, project_id, voice_name, voice_path):
         """[MỚI] Bóc SRT từ voice file và lưu vào cache (chạy background)"""
         try:
-            # Gọi get_transcription từ Tab 2
-            mode = self.main_app.config.get("boc_bang_mode", "groq")
-            srt_text = get_transcription(voice_path, voice_name, mode, self.main_app.config, self._log_extract)
+            srt_text = self._transcribe_voice_with_auto_trim(project_id, voice_name, voice_path)
+
+            if project_id not in self.main_app.projects:
+                return
             
             # Lưu vào cache
-            p_data = self.main_app.get_project_data(self.current_project_id)
+            p_data = self.main_app.get_project_data(project_id)
             if "voice_srt_cache" not in p_data:
                 p_data["voice_srt_cache"] = {}
             
             p_data["voice_srt_cache"][voice_name] = srt_text
-            self.main_app.save_project_data(self.current_project_id, p_data)
+            self.main_app.save_project_data(project_id, p_data)
             
-            self._log_extract(f"✅ Đã bóp SRT xong: {voice_name}")
+            self._log_extract(f"✅ Đã bóp SRT xong: {voice_name}", project_id=project_id)
         except Exception as e:
-            self._log_extract(f"❌ Lỗi bóc SRT {voice_name}: {str(e)}")
+            self._log_extract(f"❌ Lỗi bóc SRT {voice_name}: {str(e)}", project_id=project_id)
     
-    def _log_extract(self, msg):
+    def _log_extract(self, msg, project_id=None):
         """[MỚI] Ghi log extraction (để in ra log nếu có)"""
-        print(f"[Tab 1 Voice] {msg}")
+        voice_name, status_text = self._parse_voice_log_status(msg)
+        if project_id and voice_name and status_text:
+            self._set_voice_status(project_id, voice_name, status_text)
+
+        log_line = f"[Tab 1 Voice] {msg}"
+        try:
+            print(log_line)
+        except UnicodeEncodeError:
+            print(log_line.encode("ascii", errors="replace").decode("ascii"))
     
     def get_voice_srt(self, voice_name):
         """[MỚI] Lấy SRT của voice (từ cache)"""
@@ -615,18 +929,18 @@ class BRollTab:
         
         # 2. Nếu chưa cache, extract ngay (blocking call)
         try:
-            mode = self.main_app.config.get("boc_bang_mode", "groq")
-            srt_text = get_transcription(voice_path, voice_name, mode, self.main_app.config, self._log_extract)
+            srt_text = self._transcribe_voice_with_auto_trim(project_id, voice_name, voice_path)
             
             # Lưu vào cache
             if "voice_srt_cache" not in p_data:
                 p_data["voice_srt_cache"] = {}
             p_data["voice_srt_cache"][voice_name] = srt_text
             self.main_app.save_project_data(project_id, p_data)
+            self._log_extract(f"✅ Đã bóp SRT xong: {voice_name}", project_id=project_id)
             
             return srt_text
         except Exception as e:
-            self._log_extract(f"❌ Lỗi bóc SRT {voice_name}: {str(e)}")
+            self._log_extract(f"❌ Lỗi bóc SRT {voice_name}: {str(e)}", project_id=project_id)
             raise
             
     def add_project_dialog(self):
@@ -643,6 +957,7 @@ class BRollTab:
                     "timeline": [],
                     "product_context": "",
                     "product_name": "",
+                    "shopee_out_of_stock": False,
                     "product_links": ["", "", "", "", "", ""],
                 },
             )
@@ -677,16 +992,19 @@ class BRollTab:
         # Load ảnh mẫu ra UI
         ref1 = p_data.get("ref_img_1", "")
         ref2 = p_data.get("ref_img_2", "")
-        self.lbl_ref1.config(text=os.path.basename(ref1)[:15]+"..." if ref1 and os.path.exists(ref1) else "Chưa chọn", fg="#27ae60" if ref1 else "gray")
-        self.lbl_ref2.config(text=os.path.basename(ref2)[:15]+"..." if ref2 and os.path.exists(ref2) else "Chưa chọn", fg="#27ae60" if ref2 else "gray")
+        self.lbl_ref1.config(text=self._format_ref_image_name(ref1), fg="#27ae60" if ref1 else "gray")
+        self.lbl_ref2.config(text=self._format_ref_image_name(ref2), fg="#27ae60" if ref2 else "gray")
 
     def delete_project(self):
         if not self.current_project_id: return
         if messagebox.askyesno("Xóa", "Xóa toàn bộ Project và File trong thư mục Tool?"):
-            shutil.rmtree(self.main_app.get_proj_dir(self.current_project_id), ignore_errors=True)
-            del self.main_app.projects[self.current_project_id]
+            project_id = self.current_project_id
+            shutil.rmtree(self.main_app.get_proj_dir(project_id), ignore_errors=True)
+            del self.main_app.projects[project_id]
             self.main_app.save_projects()
             self.refresh_project_list()
+            self._clear_ai_task_states_for_project(project_id)
+            self.voice_status_by_project.pop(project_id, None)
             
             self.current_project_id = None
             self.active_page = 1
@@ -700,6 +1018,7 @@ class BRollTab:
             for widget in self.frame_tr.winfo_children(): widget.destroy()
             self.txt_context.delete("1.0", tk.END)
             self.ent_product_name.delete(0, tk.END)
+            self.var_shopee_out_of_stock.set(False)
             self._update_pagination_ui("active", 0, 1, 1)
             self._update_pagination_ui("trash", 0, 1, 1)
             for entry in self.product_link_entries:
@@ -876,6 +1195,15 @@ class BRollTab:
             daemon=True,
         ).start()
 
+        remaining_act_files = [f for f in all_act_files if f not in act_files]
+        remaining_tr_files = [f for f in all_tr_files if f not in tr_files]
+        if remaining_act_files or remaining_tr_files:
+            threading.Thread(
+                target=self.thumb_handler.generate,
+                args=(project_id, broll_dir, trash_dir, remaining_act_files, remaining_tr_files, None, False),
+                daemon=True,
+            ).start()
+
     def _build_video_rows(self, project_id, broll_dir, trash_dir, act_files, tr_files, p_data, render_request_id=None):
         if not self._is_render_request_current(project_id, render_request_id):
             return
@@ -963,6 +1291,9 @@ class BRollTab:
             tk.Button(btn_fr2, text="🗑️ Xóa", bg="#e74c3c", fg="white", font=("Arial", 8, "bold"), width=8, command=lambda v=vid_name: self.move_to_trash(v)).pack(side="left")
 
             description_text = saved_vids.get(vid_name, {}).get("description", "")
+            ai_state = self._get_ai_task_state(project_id, vid_name)
+            if ai_state:
+                description_text = ai_state.get("message", description_text)
             visible_lines = max(6, min(12, len(description_text.splitlines()) + 1))
             txt_desc = tk.Text(row_fr, height=visible_lines, font=("Arial", 10), bg="#f9f9f9", wrap="word")
             txt_desc.grid(row=0, column=3, sticky="nsew", padx=5)
@@ -974,6 +1305,7 @@ class BRollTab:
             # [BÙA AUTO-SAVE] TỰ ĐỘNG LƯU SAU KHI SẾP NGỪNG GÕ 1 GIÂY
             # ========================================================
             def on_text_change(event, v_name=vid_name):
+                self._clear_ai_task_state(project_id, v_name)
                 self.update_missing_desc_count() # Kích hoạt đếm số lượng ngay lập tức khi gõ chữ
                 
                 if hasattr(self, f"timer_{v_name}"):
@@ -1070,10 +1402,17 @@ class BRollTab:
         if "videos" not in p_data: p_data["videos"] = {}
         
         for vid_name, txt_widget in list(self.desc_entries.items()):
+            if self._get_ai_task_state(self.current_project_id, vid_name):
+                continue
+
             if vid_name not in p_data["videos"]: p_data["videos"][vid_name] = {}
             
             try:
-                p_data["videos"][vid_name]["description"] = txt_widget.get("1.0", tk.END).strip()
+                widget_text = txt_widget.get("1.0", tk.END).strip()
+                if self._is_transient_ai_message(widget_text):
+                    continue
+
+                p_data["videos"][vid_name]["description"] = widget_text
                 
                 if hasattr(self, 'audio_vars') and vid_name in self.audio_vars:
                     p_data["videos"][vid_name]["keep_audio"] = self.audio_vars[vid_name].get()
@@ -1109,6 +1448,7 @@ class BRollTab:
     def _load_product_info(self, p_data):
         self.ent_product_name.delete(0, tk.END)
         self.ent_product_name.insert(0, p_data.get("product_name", ""))
+        self.var_shopee_out_of_stock.set(bool(p_data.get("shopee_out_of_stock", False)))
 
         links = p_data.get("product_links", [])
         if len(links) < 6:
@@ -1116,7 +1456,20 @@ class BRollTab:
 
         for idx, entry in enumerate(self.product_link_entries):
             entry.delete(0, tk.END)
-            entry.insert(0, links[idx] if idx < len(links) else "")
+            entry.insert(0, normalize_shopee_product_link(links[idx] if idx < len(links) else ""))
+
+    def _normalize_product_link_entry(self, entry):
+        raw_value = entry.get()
+        cleaned_value = normalize_shopee_product_link(raw_value)
+        if cleaned_value != raw_value.strip():
+            entry.delete(0, tk.END)
+            entry.insert(0, cleaned_value)
+        return cleaned_value
+
+    def _on_product_link_focus_out(self, event):
+        if event.widget in self.product_link_entries:
+            self._normalize_product_link_entry(event.widget)
+            self.save_product_info()
 
     def _on_product_info_change(self, event):
         if hasattr(self, "timer_product_info"):
@@ -1127,9 +1480,12 @@ class BRollTab:
         if not self.current_project_id:
             return
 
+        cleaned_links = [self._normalize_product_link_entry(entry) for entry in self.product_link_entries]
+
         p_data = self.main_app.get_project_data(self.current_project_id)
         p_data["product_name"] = self.ent_product_name.get().strip()
-        p_data["product_links"] = [entry.get().strip() for entry in self.product_link_entries]
+        p_data["shopee_out_of_stock"] = bool(self.var_shopee_out_of_stock.get())
+        p_data["product_links"] = cleaned_links
         self.main_app.save_project_data(self.current_project_id, p_data)
 
     def start_auto_tag(self):
@@ -1141,13 +1497,37 @@ class BRollTab:
             self.main_app.config["kie_key"] = kie_key
             self.main_app.save_config()
 
+        project_id = self.current_project_id
+        self.save_all_descriptions()
         context = self.txt_context.get("1.0", tk.END).strip()
         self.btn_auto_tag.config(state="disabled", text="⏳ ĐANG SOI TẤT CẢ...", bg="#7f8c8d")
-        
-        p_data = self.main_app.get_project_data(self.current_project_id)
+
+        p_data = self.main_app.get_project_data(project_id)
+        saved_videos = p_data.get("videos", {})
+        target_video_names = self.filtered_act_files if self.filtered_act_files else list(saved_videos.keys())
+
+        videos_to_tag = []
+        for vid_name in target_video_names:
+            if vid_name not in saved_videos:
+                continue
+
+            if self._get_ai_task_state(project_id, vid_name):
+                continue
+
+            current_text = saved_videos.get(vid_name, {}).get("description", "").strip()
+            if current_text:
+                continue
+
+            task_token = self._start_ai_task(project_id, vid_name, "⏳ AI đang soi ảnh (kèm mẫu)...")
+            videos_to_tag.append((vid_name, task_token))
+
+        if not videos_to_tag:
+            self.btn_auto_tag.config(state="normal", text="🧠 AI TỰ NHÌN & ĐIỀN", bg="#d35400")
+            return
+
         ref1 = p_data.get("ref_img_1", "")
         ref2 = p_data.get("ref_img_2", "")
-        threading.Thread(target=self.ai_handler.process_auto_tag, args=(kie_key, context, ref1, ref2), daemon=True).start()
+        threading.Thread(target=self.ai_handler.process_auto_tag, args=(project_id, videos_to_tag, kie_key, context, ref1, ref2), daemon=True).start()
 
     def start_single_auto_tag(self, vid_name):
         if not self.current_project_id: return
@@ -1158,17 +1538,24 @@ class BRollTab:
             self.main_app.config["kie_key"] = kie_key
             self.main_app.save_config()
 
+        project_id = self.current_project_id
         context = self.txt_context.get("1.0", tk.END).strip()
-        
-        # Báo hiệu UI đang soi 1 file
+
+        hint_text = ""
         if vid_name in self.desc_entries:
-            self.desc_entries[vid_name].delete("1.0", tk.END)
-            self.desc_entries[vid_name].insert("1.0", "⏳ AI đang soi ảnh, sếp đợi xíu...")
+            try:
+                current_text = self.desc_entries[vid_name].get("1.0", tk.END).strip()
+                if current_text and not self._is_transient_ai_message(current_text):
+                    hint_text = current_text
+            except tk.TclError:
+                pass
+
+        task_token = self._start_ai_task(project_id, vid_name, "⏳ AI đang soi ảnh, sếp đợi xíu...")
             
-        p_data = self.main_app.get_project_data(self.current_project_id)
+        p_data = self.main_app.get_project_data(project_id)
         ref1 = p_data.get("ref_img_1", "")
         ref2 = p_data.get("ref_img_2", "")
-        threading.Thread(target=self.ai_handler.process_single_tag, args=(kie_key, vid_name, context, ref1, ref2), daemon=True).start()
+        threading.Thread(target=self.ai_handler.process_single_tag, args=(project_id, task_token, kie_key, vid_name, context, ref1, ref2, hint_text), daemon=True).start()
 
 
     # =======================================================
@@ -1202,10 +1589,25 @@ class BRollTab:
         total_count = len(target_names)
 
         for vid_name in target_names:
-            if vid_name in self.desc_entries:
-                text = self.desc_entries[vid_name].get("1.0", tk.END).strip()
+            saved_text = saved_videos.get(vid_name, {}).get("description", "").strip()
+            ai_state = self._get_ai_task_state(self.current_project_id, vid_name)
+
+            if ai_state:
+                text = saved_text
+            elif vid_name in self.desc_entries:
+                try:
+                    widget_text = self.desc_entries[vid_name].get("1.0", tk.END).strip()
+                except tk.TclError:
+                    widget_text = None
+
+                if widget_text is None:
+                    text = saved_text
+                elif self._is_transient_ai_message(widget_text):
+                    text = saved_text
+                else:
+                    text = widget_text
             else:
-                text = saved_videos.get(vid_name, {}).get("description", "").strip()
+                text = saved_text
             if not text:
                 empty_count += 1
 
@@ -1264,16 +1666,31 @@ class BRollTab:
         messagebox.showinfo("Xong", "Đang khởi tạo lại ảnh bìa ngầm, sếp đợi xíu là nó hiện ra nhé!")
 
 
+    def _format_ref_image_name(self, file_path, max_len=20):
+        if not file_path or not os.path.exists(file_path):
+            return "Chưa chọn"
+
+        file_name = os.path.basename(file_path)
+        if len(file_name) <= max_len:
+            return file_name
+
+        name, ext = os.path.splitext(file_name)
+        keep_len = max(8, max_len - len(ext) - 3)
+        return f"{name[:keep_len]}...{ext}"
+
     def select_ref_image(self, num):
         if not self.current_project_id: return
-        file_path = filedialog.askopenfilename(title=f"Chọn ảnh Sản Phẩm Mẫu {num}", filetypes=[("Images", "*.jpg *.png *.jpeg")])
+        file_path = filedialog.askopenfilename(
+            title=f"Chọn ảnh Sản Phẩm Mẫu {num}",
+            filetypes=[("Images", "*.jpg *.jpeg *.png *.webp"), ("All files", "*.*")]
+        )
         if file_path:
             p_data = self.main_app.get_project_data(self.current_project_id)
             p_data[f"ref_img_{num}"] = file_path
             self.main_app.save_project_data(self.current_project_id, p_data)
             
             lbl = self.lbl_ref1 if num == 1 else self.lbl_ref2
-            lbl.config(text=os.path.basename(file_path), fg="#27ae60")
+            lbl.config(text=self._format_ref_image_name(file_path), fg="#27ae60")
 
     def clear_ref_images(self):
         if not self.current_project_id: return

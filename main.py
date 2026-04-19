@@ -73,7 +73,7 @@ class MainApp:
     def __init__(self, root):
         self.root = root
         self.root.title("🎬 TOOL EDIT VIDEO PRO BY PHẠM VĂN BÌNH - 0345.26.22.29")
-        self.root.geometry("1900x1200")
+        self.root.geometry("2200x1200")
         self.root.configure(bg="#f4f6f9")
         
         # =======================================================
@@ -177,6 +177,7 @@ class MainApp:
             "timeline": [],
             "product_context": "",
             "product_name": "",
+            "shopee_out_of_stock": False,
             "product_links": ["", "", "", "", "", ""],
         }
 

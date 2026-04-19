@@ -4,6 +4,7 @@ import os
 import re
 import threading
 import unicodedata
+from urllib.parse import urlsplit, urlunsplit
 
 from paths import BASE_PATH
 
@@ -34,6 +35,28 @@ def _normalize_header(value):
     normalized = unicodedata.normalize("NFD", text)
     normalized = "".join(ch for ch in normalized if unicodedata.category(ch) != "Mn")
     return normalized
+
+
+def normalize_shopee_product_link(value):
+    text = str(value or "").strip().strip('"\'')
+    if not text:
+        return ""
+
+    text = text.split()[0].strip().strip('"\'')
+
+    try:
+        parsed = urlsplit(text)
+        if parsed.scheme and parsed.netloc:
+            clean_path = parsed.path.rstrip("/") if parsed.path not in ("", "/") else parsed.path
+            return urlunsplit((parsed.scheme, parsed.netloc, clean_path, "", ""))
+    except Exception:
+        pass
+
+    if "?" in text:
+        text = text.split("?", 1)[0]
+    if "#" in text:
+        text = text.split("#", 1)[0]
+    return text.rstrip("/")
 
 
 def _get_column_map(headers):
@@ -67,12 +90,21 @@ def _load_project_product_info(proj_dir):
     except Exception:
         return None
 
+    out_of_stock = bool(project_data.get("shopee_out_of_stock", False))
+    if out_of_stock:
+        return {
+            "out_of_stock": True,
+            "product_name": "",
+            "caption": "",
+            "links": [""] * 6,
+        }
+
     product_name = str(project_data.get("product_name", "") or "").strip()
     raw_links = project_data.get("product_links", [])
     if not isinstance(raw_links, list):
         raw_links = []
 
-    links = [str(item or "").strip() for item in raw_links[:6]]
+    links = [normalize_shopee_product_link(item) for item in raw_links[:6]]
     if len(links) < 6:
         links.extend([""] * (6 - len(links)))
 
@@ -80,10 +112,16 @@ def _load_project_product_info(proj_dir):
         return None
 
     return {
+        "out_of_stock": False,
         "product_name": product_name,
         "caption": _build_caption(product_name),
         "links": links,
     }
+
+
+def is_shopee_out_of_stock_project(proj_dir):
+    product_info = _load_project_product_info(proj_dir)
+    return bool(product_info and product_info.get("out_of_stock"))
 
 
 def _build_caption(product_name):
@@ -95,7 +133,7 @@ def _build_caption(product_name):
 
 
 def _build_link_cell(links):
-    cleaned_links = [str(item or "").strip() for item in links[:6]]
+    cleaned_links = [normalize_shopee_product_link(item) for item in links[:6]]
     if len(cleaned_links) < 6:
         cleaned_links.extend([""] * (6 - len(cleaned_links)))
     return "\n".join(cleaned_links)
@@ -197,7 +235,7 @@ def load_shopee_jobs(csv_path=None, config=None):
                     "stt": row[col_map["stt"] - 1],
                     "video_name": video_name,
                     "product_name": str(row[col_map["product"] - 1] or "").strip(),
-                    "link": str(row[col_map["link"] - 1] or ""),
+                    "link": normalize_shopee_product_link(row[col_map["link"] - 1]),
                     "caption": str(row[col_map["caption"] - 1] or ""),
                     "status": str(row[col_map["status"] - 1] or "").strip(),
                 }
@@ -225,13 +263,14 @@ def claim_next_shopee_job(worker_label, csv_path=None, config=None):
 
             processing_status = f"Đang xử ({worker_label})"
             row[col_map["status"] - 1] = processing_status
+            row[col_map["link"] - 1] = normalize_shopee_product_link(row[col_map["link"] - 1])
             _write_csv_rows(target_csv, rows)
             return {
                 "row_index": row_idx,
                 "stt": row[col_map["stt"] - 1],
                 "video_name": video_name,
                 "product_name": str(row[col_map["product"] - 1] or "").strip(),
-                "link": str(row[col_map["link"] - 1] or ""),
+                "link": row[col_map["link"] - 1],
                 "caption": str(row[col_map["caption"] - 1] or ""),
                 "status": processing_status,
             }
@@ -250,6 +289,8 @@ def resolve_shopee_video_path(video_name):
 def export_rendered_video_to_shopee_files(proj_dir, out_file, config=None, default_status="Chưa chuyển"):
     product_info = _load_project_product_info(proj_dir)
     if not product_info:
+        return False, ""
+    if product_info.get("out_of_stock"):
         return False, ""
 
     target_csv = get_shopee_csv_path(config)

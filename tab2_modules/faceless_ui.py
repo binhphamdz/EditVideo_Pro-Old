@@ -65,11 +65,7 @@ class FacelessTab:
             "wipe_left": "⬅️ Quét Trái",
             "wipe_right": "➡️ Quét Phải",
             "hlslice": "🔀 Vụt Ngang (TikTok)",
-            "vsplit": "🔀 Vụt Dọc (TikTok)",
             "zoom_in": "🔍 Phóng To",
-            "zoom_out": "🔍 Thu Nhỏ",
-            "diagonal": "↗️ Chéo",
-            "cross_fade": "✨ Mờ Chéo",
         }
         
         self.lst_trans = tk.Listbox(fr_trans_container, selectmode=tk.MULTIPLE, height=6, width=20, font=("Arial", 9), exportselection=False)
@@ -77,7 +73,13 @@ class FacelessTab:
             self.lst_trans.insert(tk.END, trans_display)
         
         # Load saved transitions
-        saved_trans = self.main_app.config.get("selected_transitions", ["fade"])
+        saved_trans = [
+            trans_key
+            for trans_key in self.main_app.config.get("selected_transitions", ["fade"])
+            if trans_key in self.transitions
+        ]
+        if not saved_trans:
+            saved_trans = ["fade"]
         for idx, (trans_key, trans_display) in enumerate(self.transitions.items()):
             if trans_key in saved_trans:
                 self.lst_trans.selection_set(idx)
@@ -138,7 +140,7 @@ class FacelessTab:
         fr_row_thread = tk.Frame(top_frame, bg="#ffffff")
         fr_row_thread.pack(fill="x", pady=5)
         tk.Label(fr_row_thread, text="Số Luồng:", bg="#ffffff", font=("Arial", 9, "bold"), fg="#c0392b").pack(side="left")
-        self.spin_threads = ttk.Spinbox(fr_row_thread, from_=1, to=5, width=5, font=("Arial", 10, "bold"))
+        self.spin_threads = ttk.Spinbox(fr_row_thread, from_=1, to=5, width=5, font=("Arial", 10, "bold"), command=self._save_config_auto)
         self.spin_threads.set(self.main_app.config.get("threads", 2))
         self.spin_threads.pack(side="left", padx=5)
 
@@ -150,12 +152,12 @@ class FacelessTab:
         self.scale_broll_vol.set(self.main_app.config.get("broll_vol", 30))
         self.scale_broll_vol.pack(anchor="w")
 
-        tk.Label(adj_frame, text="Tốc độ Video (x):", bg="#ffffff", font=("Arial", 9, "bold")).pack(anchor="w", pady=(0, 2))
+        tk.Label(adj_frame, text="Tăng tốc video tổng (x):", bg="#ffffff", font=("Arial", 9, "bold")).pack(anchor="w", pady=(0, 2))
         self.scale_speed = tk.Scale(adj_frame, from_=0.5, to=3.0, resolution=0.1, orient="horizontal", bg="#ffffff", length=200)
         self.scale_speed.set(self.main_app.config.get("video_speed", 1.0))
         self.scale_speed.pack(anchor="w")
         
-        tk.Label(adj_frame, text="Max Auto Speed:", bg="#ffffff", font=("Arial", 9, "bold")).pack(anchor="w", pady=(2, 2))
+        tk.Label(adj_frame, text="Tăng tốc cảnh trám tối đa (x):", bg="#ffffff", font=("Arial", 9, "bold")).pack(anchor="w", pady=(2, 2))
         self.scale_auto_speed = tk.Scale(adj_frame, from_=1.0, to=3.0, resolution=0.1, orient="horizontal", bg="#ffffff", length=200)
         self.scale_auto_speed.set(self.main_app.config.get("auto_speed_max", 1.4))
         self.scale_auto_speed.pack(anchor="w")
@@ -166,23 +168,27 @@ class FacelessTab:
         self.scale_bright.pack(anchor="w")
 
         self.use_trans = tk.BooleanVar(value=self.main_app.config.get("use_trans", True))
-        tk.Checkbutton(adj_frame, text="Hiệu ứng Slide", variable=self.use_trans, bg="#ffffff").pack(anchor="w", pady=(5, 0))
+        self.chk_use_trans = tk.Checkbutton(adj_frame, text="Bật hiệu ứng chuyển cảnh", variable=self.use_trans, bg="#ffffff")
+        self.chk_use_trans.pack(anchor="w", pady=(5, 0))
 
         self.use_sfx = tk.BooleanVar(value=self.main_app.config.get("use_sfx", True))
-        tk.Checkbutton(adj_frame, text="Âm chuyển cảnh", variable=self.use_sfx, bg="#ffffff").pack(anchor="w")
+        self.chk_use_sfx = tk.Checkbutton(adj_frame, text="Bật âm chuyển cảnh", variable=self.use_sfx, bg="#ffffff")
+        self.chk_use_sfx.pack(anchor="w")
 
         # [MỚI] Gắn auto-save vào các slider và checkbox
         self.scale_broll_vol.bind("<ButtonRelease-1>", self._save_config_auto)
         self.scale_speed.bind("<ButtonRelease-1>", self._save_config_auto)
         self.scale_auto_speed.bind("<ButtonRelease-1>", self._save_config_auto)
         self.scale_bright.bind("<ButtonRelease-1>", self._save_config_auto)
-        self.use_trans.trace_add("write", self._save_config_auto)
+        self.use_trans.trace_add("write", self._on_transition_toggle)
         self.use_sfx.trace_add("write", self._save_config_auto)
         self.ent_groq.bind("<KeyRelease>", self._save_config_auto)
         self.ent_kie.bind("<KeyRelease>", self._save_config_auto)
         self.ent_font.bind("<KeyRelease>", self._save_config_auto)
         self.spin_threads.bind("<KeyRelease>", self._save_config_auto)
+        self.spin_threads.bind("<FocusOut>", self._save_config_auto)
         self.boc_bang_mode.trace_add("write", self._save_config_auto)
+        self._sync_transition_controls()
 
         # LOG VÀ NÚT RENDER
         mid_frame = tk.LabelFrame(self.parent, text=" 2. Log Tiến Trình ", font=("Arial", 11, "bold"), bg="#ffffff", padx=15, pady=5)
@@ -195,7 +201,7 @@ class FacelessTab:
         self.btn_run_batch = tk.Button(bot_frame, text="🚀 BẤM RENDER (ĐA LUỒNG)", bg="#c0392b", fg="white", font=("Arial", 14, "bold"), pady=10, command=self.start_batch_process)
         self.btn_run_batch.pack(fill="x")
 
-    def _save_config_auto(self, event=None):
+    def _save_config_auto(self, *args):
         """[MỚI] Tự động lưu config khi bất kỳ setting nào thay đổi"""
         try:
             self.main_app.config["broll_vol"] = self.scale_broll_vol.get()
@@ -216,6 +222,37 @@ class FacelessTab:
             self.main_app.save_config()
         except Exception as e:
             print(f"⚠️ Lỗi auto-save config: {e}")
+
+    def _ensure_transition_selection(self):
+        if self.lst_trans.curselection():
+            return
+
+        saved_keys = [
+            trans_key
+            for trans_key in self.main_app.config.get("selected_transitions", ["fade"])
+            if trans_key in self.transitions
+        ]
+        if not saved_keys:
+            saved_keys = ["fade"]
+
+        transition_indices = {trans_key: idx for idx, trans_key in enumerate(self.transitions.keys())}
+        for trans_key in saved_keys:
+            index = transition_indices.get(trans_key)
+            if index is not None:
+                self.lst_trans.selection_set(index)
+
+    def _sync_transition_controls(self):
+        is_enabled = self.use_trans.get()
+        self.lst_trans.configure(state=tk.NORMAL if is_enabled else tk.DISABLED)
+        self.scale_trans_dur.configure(state=tk.NORMAL if is_enabled else tk.DISABLED)
+        self.chk_use_sfx.configure(state=tk.NORMAL if is_enabled else tk.DISABLED)
+
+        if is_enabled:
+            self._ensure_transition_selection()
+
+    def _on_transition_toggle(self, *args):
+        self._sync_transition_controls()
+        self._save_config_auto()
 
     def _update_broll_stats(self, pid, timeline, voice_name):
         """[MỚI] Cộng usage_count cho các video đã dùng & refresh tab BRoll"""
@@ -280,10 +317,15 @@ class FacelessTab:
         voice_dir = os.path.join(self.main_app.get_proj_dir(self.pid_map[proj_name]), "Voices")
         if os.path.exists(voice_dir):
             for f in os.listdir(voice_dir):
-                if f.lower().endswith(('.mp3', '.wav')): self.lst_voices.insert(tk.END, f)
+                if f.lower().endswith(('.mp3', '.wav', '.m4a')): self.lst_voices.insert(tk.END, f)
 
     def _save_selected_transitions(self, event=None):
         """[MỚI] Lưu transitions đã chọn vào config"""
+        if not self.use_trans.get():
+            self._save_config_auto()
+            return
+
+        self._ensure_transition_selection()
         selected_indices = self.lst_trans.curselection()
         selected_trans_keys = [list(self.transitions.keys())[i] for i in selected_indices]
         self.main_app.config["selected_transitions"] = selected_trans_keys if selected_trans_keys else ["fade"]
@@ -327,17 +369,20 @@ class FacelessTab:
     def start_batch_process(self):
         proj_name = self.combo_proj.get()
         selected_indices = self.lst_voices.curselection()
-        selected_trans = self.lst_trans.curselection()  # [MỚI] Kiểm tra transitions
         
         if not proj_name or not selected_indices: 
             return messagebox.showwarning("Lỗi", "Vui lòng chọn Project và bôi đen Voice!")
         
-        if not selected_trans:
-            return messagebox.showwarning("Lỗi", "Vui lòng chọn ít nhất 1 Hiệu Ứng Chuyển Cảnh!")
+        if self.use_trans.get():
+            self._ensure_transition_selection()
+            selected_trans = self.lst_trans.curselection()
+            if not selected_trans:
+                return messagebox.showwarning("Lỗi", "Vui lòng chọn ít nhất 1 Hiệu Ứng Chuyển Cảnh!")
         
         # [CẬP NHẬT] Gọi hàm auto-save để lưu toàn bộ config
         self._save_config_auto()
-        self._save_selected_transitions()  # [MỚI] Lưu transitions
+        if self.use_trans.get():
+            self._save_selected_transitions()  # [MỚI] Lưu transitions
         self.main_app.config["app_base_path"] = BASE_PATH
         self.main_app.save_config()
 

@@ -14,6 +14,7 @@ from shopee_export import (
     claim_next_shopee_job,
     get_shopee_csv_path,
     load_shopee_jobs,
+    normalize_shopee_product_link,
     resolve_shopee_video_path,
     update_shopee_status,
 )
@@ -521,7 +522,7 @@ class AutoPostTab:
 
                 video_name = current_job["video_name"]
                 caption_text = current_job.get("caption", "")
-                link_text = str(current_job.get("link", "") or "")
+                link_text = normalize_shopee_product_link(current_job.get("link", ""))
                 video_path = resolve_shopee_video_path(video_name)
 
                 if not os.path.exists(video_path):
