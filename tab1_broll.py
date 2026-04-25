@@ -122,7 +122,11 @@ class BRollTab:
         
         tk.Button(btn_v_fr, text="➕ Thêm", bg="#f39c12", fg="white", font=("Arial", 8, "bold"), width=8, command=self.import_voice).pack(pady=(0, 5))
         tk.Button(btn_v_fr, text="▶ Nghe", bg="#3498db", fg="white", font=("Arial", 8, "bold"), width=8, command=self.play_voice).pack(pady=(0, 5))
-        tk.Button(btn_v_fr, text="🗑️ Xóa", bg="#e74c3c", fg="white", font=("Arial", 8, "bold"), width=8, command=self.delete_voice).pack()
+        tk.Button(btn_v_fr, text="🗑️ Xóa", bg="#e74c3c", fg="white", font=("Arial", 8, "bold"), width=8, command=self.delete_voice).pack(pady=(0, 5))
+        
+        # Nút Máy giặt được nhét chuẩn vào btn_v_fr, đổi màu Tím cho dễ nhận diện
+        tk.Button(btn_v_fr, text="🧹 Dọn Tên", bg="#9b59b6", fg="white", font=("Arial", 8, "bold"), width=8, command=self.bulk_rename_project_files).pack()
+
 
         # 2. KHUNG CÔNG CỤ CẢNH TRÁM
         fr_tools = tk.LabelFrame(control_panel, text=" 🛠️ Quản Lý Cảnh Trám ", font=("Arial", 10, "bold"), bg="#ffffff", padx=10, pady=5)
@@ -719,9 +723,26 @@ class BRollTab:
         if not self.current_project_id: return
         files = filedialog.askopenfilenames(title="Chọn Video", filetypes=[("Video", "*.mp4 *.mov")])
         if files:
-            broll_dir = os.path.join(self.main_app.get_proj_dir(self.current_project_id), "Broll")
+            project_id = self.current_project_id
+            # Lấy tên Project và gọt sạch sẽ
+            proj_name = self.main_app.projects[project_id]['name']
+            clean_proj = self._clean_project_name(proj_name)
+            
+            broll_dir = os.path.join(self.main_app.get_proj_dir(project_id), "Broll")
             os.makedirs(broll_dir, exist_ok=True)
-            for f in files: shutil.copy2(f, os.path.join(broll_dir, os.path.basename(f)))
+            
+            # Lấy con số tiếp theo
+            current_idx = self._get_next_index(broll_dir, clean_proj)
+            
+            for f in files: 
+                _, ext = os.path.splitext(f)
+                # Đặt tên mới: vd tuixachda_1.mp4
+                target_name = f"{clean_proj}_{current_idx}{ext.lower()}"
+                target_path = os.path.join(broll_dir, target_name)
+                current_idx += 1 # Đếm lên
+                
+                shutil.copy2(f, target_path)
+                
             self.render_video_list(reset_pages=True)
 
     def load_voices(self):
@@ -824,37 +845,25 @@ class BRollTab:
                     pass
             raise
 
-    def _save_media_as_mp3(self, source_path, target_dir):
-        """Lưu media vào Voices dưới dạng mp3; nếu đã là mp3 thì copy nguyên file."""
-        base_name, extension = os.path.splitext(os.path.basename(source_path))
-        extension = extension.lower()
-        target_name = f"{base_name}.mp3"
+    def _save_media_as_mp3(self, source_path, target_dir, target_name):
+        """Lưu media vào Voices dưới dạng mp3 (Sử dụng tên chỉ định)"""
         target_path = os.path.join(target_dir, target_name)
-
-        if extension == ".mp3":
+        _, extension = os.path.splitext(source_path)
+        
+        if extension.lower() == ".mp3":
             shutil.copy2(source_path, target_path)
             return target_name, target_path
 
         command = [
-            "ffmpeg",
-            "-y",
-            "-i",
-            source_path,
-            "-vn",
-            "-acodec",
-            "libmp3lame",
-            "-q:a",
-            "2",
+            "ffmpeg", "-y", "-i", source_path,
+            "-vn", "-acodec", "libmp3lame", "-q:a", "2",
             target_path,
         ]
 
         creation_flags = 0x08000000 if os.name == 'nt' else 0
         subprocess.run(
-            command,
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=creation_flags,
+            command, check=True, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, creationflags=creation_flags,
         )
         return target_name, target_path
 
@@ -1003,34 +1012,35 @@ class BRollTab:
         files = filedialog.askopenfilenames(title="Chọn Voice / Video", filetypes=[("Media", "*.mp3 *.wav *.m4a *.mp4 *.mov *.mkv *.avi *.webm *.m4v")])
         if files:
             project_id = self.current_project_id
-            voice_dir = os.path.join(self.main_app.get_proj_dir(self.current_project_id), "Voices")
+            # Lấy tên Project và gọt sạch sẽ
+            proj_name = self.main_app.projects[project_id]['name']
+            clean_proj = self._clean_project_name(proj_name)
+            
+            voice_dir = os.path.join(self.main_app.get_proj_dir(project_id), "Voices")
             os.makedirs(voice_dir, exist_ok=True)
             
-            # 1. Gọi cuốn sổ JSON ra (Hàm get này tự có khóa bảo vệ bên main.py rồi)
             p_data = self.main_app.get_project_data(project_id)
-            if "voice_usage" not in p_data: 
-                p_data["voice_usage"] = {}
-            if "voice_srt_cache" not in p_data:  # [MỚI] Khởi tạo SRT cache
-                p_data["voice_srt_cache"] = {}
-                
+            if "voice_usage" not in p_data: p_data["voice_usage"] = {}
+            if "voice_srt_cache" not in p_data: p_data["voice_srt_cache"] = {}
+            
+            # Lấy con số tiếp theo
+            current_idx = self._get_next_index(voice_dir, clean_proj)
+            
             for f in files: 
-                file_name, _ = self._save_media_as_mp3(f, voice_dir)
+                # Đặt tên mới: vd tuixachda_1.mp3
+                target_name = f"{clean_proj}_{current_idx}.mp3"
+                current_idx += 1 # Đếm lên
+                
+                file_name, file_path = self._save_media_as_mp3(f, voice_dir, target_name)
                 self._set_voice_status(project_id, file_name, "⏳ Chờ bóc SRT")
                 
-                # Khai báo lính mới
                 if file_name not in p_data["voice_usage"]:
                     p_data["voice_usage"][file_name] = 0
-            
-            # 2. Lưu lại (Hàm save này cũng tự có khóa bảo vệ bên main.py rồi, gọi thẳng tay!)
-            self.main_app.save_project_data(project_id, p_data)
-            
-            # 3. [MỚI] Bắt đầu extract SRT cho từng voice mới (chạy background)
-            for f in files:
-                file_name = os.path.splitext(os.path.basename(f))[0] + ".mp3"
-                file_path = os.path.join(voice_dir, file_name)
+                
                 thread = threading.Thread(target=self._extract_voice_srt_async, args=(project_id, file_name, file_path), daemon=True)
                 thread.start()
-                
+            
+            self.main_app.save_project_data(project_id, p_data)
             self.load_voices()
     
     def _extract_voice_srt_async(self, project_id, voice_name, voice_path):
@@ -1921,3 +1931,120 @@ class BRollTab:
         
         self.lbl_ref1.config(text="Chưa chọn", fg="gray")
         self.lbl_ref2.config(text="Chưa chọn", fg="gray")
+
+    def _clean_project_name(self, name):
+        """Biến 'Túi Xách Da' thành 'tuixachda' (Xử lý chuẩn chữ Đ tiếng Việt)"""
+        import unicodedata
+        import re
+        
+        # [BẢN VÁ LỖI] - Xử lý "cứng" chữ Đ/đ trước khi lột dấu
+        name = name.replace('Đ', 'D').replace('đ', 'd')
+        
+        # Xóa dấu tiếng Việt
+        normalized = unicodedata.normalize('NFD', name)
+        no_accents = "".join(c for c in normalized if unicodedata.category(c) != 'Mn')
+        
+        # Chuyển thành chữ thường và xóa sạch khoảng trắng, ký tự lạ
+        clean_name = re.sub(r'[^a-z0-9]', '', no_accents.lower())
+        return clean_name or "project"
+
+    
+
+    def bulk_rename_project_files(self):
+        import os
+        import re
+        from tkinter import messagebox
+
+        if not self.current_project_id:
+            messagebox.showwarning("Chú ý", "Sếp chưa chọn Project nào ở Tab 1 cả!")
+            return
+
+        project_id = self.current_project_id
+        proj_name = self.main_app.projects[project_id]['name']
+        proj_dir = self.main_app.get_proj_dir(project_id)
+        p_data = self.main_app.get_project_data(project_id)
+
+        clean_proj = self._clean_project_name(proj_name)
+        renamed_count = 0
+
+        # --- [BẢN ĐỘ MỚI] MÁY CHUYỂN NHƯỢNG SIÊU TỐC ---
+        # Quét mọi ngóc ngách trong JSON, thấy dữ liệu của tên cũ là bốc sang tên mới
+        def migrate_file_data(old_filename, new_filename):
+            for key, value in p_data.items():
+                if isinstance(value, dict) and old_filename in value:
+                    value[new_filename] = value.pop(old_filename)
+        # -----------------------------------------------
+
+        # 2. XỬ LÝ FOLDER VOICE
+        voice_dir = os.path.join(proj_dir, "Voices")
+        if os.path.exists(voice_dir):
+            next_v_idx = self._get_next_index(voice_dir, clean_proj)
+            for filename in os.listdir(voice_dir):
+                pattern = re.compile(rf"^{re.escape(clean_proj)}_(\d+)\.[a-zA-Z0-9]+$")
+                if pattern.match(filename): continue
+                    
+                old_path = os.path.join(voice_dir, filename)
+                if os.path.isfile(old_path):
+                    _, ext = os.path.splitext(filename)
+                    new_name = f"{clean_proj}_{next_v_idx}{ext.lower()}"
+                    new_path = os.path.join(voice_dir, new_name)
+                    
+                    try:
+                        os.rename(old_path, new_path)
+                        next_v_idx += 1
+                        renamed_count += 1
+                        
+                        # Kích hoạt máy chuyển nhượng cho Voice
+                        migrate_file_data(filename, new_name)
+                    except Exception as e:
+                        print(f"Lỗi đổi tên Voice {filename}: {e}")
+
+        # 3. XỬ LÝ FOLDER BROLL
+        broll_dir = os.path.join(proj_dir, "Broll")
+        if os.path.exists(broll_dir):
+            next_b_idx = self._get_next_index(broll_dir, clean_proj)
+            for filename in os.listdir(broll_dir):
+                pattern = re.compile(rf"^{re.escape(clean_proj)}_(\d+)\.[a-zA-Z0-9]+$")
+                if pattern.match(filename): continue
+                    
+                old_path = os.path.join(broll_dir, filename)
+                if os.path.isfile(old_path):
+                    _, ext = os.path.splitext(filename)
+                    new_name = f"{clean_proj}_{next_b_idx}{ext.lower()}"
+                    new_path = os.path.join(broll_dir, new_name)
+                    
+                    try:
+                        os.rename(old_path, new_path)
+                        next_b_idx += 1
+                        renamed_count += 1
+                        
+                        # Kích hoạt máy chuyển nhượng cho Broll (Giữ nguyên MÔ TẢ)
+                        migrate_file_data(filename, new_name)
+                    except Exception as e:
+                        print(f"Lỗi đổi tên Broll {filename}: {e}")
+
+        # 4. LƯU & CẬP NHẬT GIAO DIỆN TAB 1
+        self.main_app.save_project_data(project_id, p_data)
+        messagebox.showinfo("Hoàn tất!", f"🧹 Đã đổi tên chuẩn cho {renamed_count} file!\n\nMọi thông tin (Mô tả Broll, Lượt dùng Voice, SRT...) đều được tự động giữ nguyên.")
+        
+        self.load_voices()
+        self.render_video_list(reset_pages=True)
+
+
+    def _get_next_index(self, directory, prefix):
+        """Quét thư mục để tìm số thứ tự lớn nhất hiện tại rồi + 1"""
+        import os
+        import re
+        max_idx = 0
+        if not os.path.exists(directory):
+            return 1
+            
+        # Tìm các file có dạng: prefix_1.mp4, prefix_2.mp3...
+        pattern = re.compile(rf"^{re.escape(prefix)}_(\d+)\.[a-zA-Z0-9]+$")
+        for fname in os.listdir(directory):
+            match = pattern.match(fname)
+            if match:
+                idx = int(match.group(1))
+                if idx > max_idx:
+                    max_idx = idx
+        return max_idx + 1
