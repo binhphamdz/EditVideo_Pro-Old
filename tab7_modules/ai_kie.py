@@ -43,7 +43,7 @@ Yêu cầu:
         threading.Thread(target=self._call_kie_api_direct, args=(kie_key, system_prompt + "\n\n" + user_content, "spun"), daemon=True).start()
 
     def _call_kie_api_direct(self, api_key, prompt, task_type):
-        url = "https://api.kie.ai/gemini-2.5-flash/v1/chat/completions" 
+        url = "https://api.kie.ai/gemini-3-flash/v1/chat/completions" 
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
         payload = {
             "messages": [{"role": "user", "content": prompt}],

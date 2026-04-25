@@ -118,7 +118,7 @@ class AIVisionHandler:
         content_array.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_target}"}})
         
         return {
-            "model": "gemini-2.5-flash", 
+            "model": "gemini-3-flash", 
             "messages": [{"role": "user", "content": content_array}], 
             "temperature": 0.2 # Nhiệt độ thấp để nhận diện cực chính xác
         }
@@ -128,7 +128,7 @@ class AIVisionHandler:
         try:
             folder = os.path.join(self.ui.main_app.get_proj_dir(project_id), "Broll")
             thumb_dir = os.path.join(folder, ".thumbnails")
-            url_kie = "https://api.kie.ai/gemini-2.5-flash/v1/chat/completions"
+            url_kie = "https://api.kie.ai/gemini-3-flash/v1/chat/completions"
 
             prompt = self._build_prompt(context)
 
@@ -190,7 +190,7 @@ class AIVisionHandler:
         try:
             folder = os.path.join(self.ui.main_app.get_proj_dir(project_id), "Broll")
             thumb_dir = os.path.join(folder, ".thumbnails")
-            url_kie = "https://api.kie.ai/gemini-2.5-flash/v1/chat/completions"
+            url_kie = "https://api.kie.ai/gemini-3-flash/v1/chat/completions"
 
             thumb_path = os.path.join(thumb_dir, f"{vid_name}.jpg")
             if not os.path.exists(thumb_path): 

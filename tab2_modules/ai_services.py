@@ -3,6 +3,7 @@ import time
 import requests
 import json
 import random
+import hashlib
 import re # [MỚI] Bùa móc JSON chống AI nói nhảm
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -115,6 +116,38 @@ def _merge_related_short_segments(segments, target_min=4.0, target_max=6.0):
         i += 1
 
     return merged
+
+
+def _get_voice_v0_cache_path(config):
+    base_path = config.get("app_base_path", os.getcwd())
+    cache_dir = os.path.join(base_path, "Workspace_Data")
+    os.makedirs(cache_dir, exist_ok=True)
+    return os.path.join(cache_dir, "voice_v0_cache.json")
+
+
+def _load_voice_v0_cache(config):
+    cache_path = _get_voice_v0_cache_path(config)
+    if not os.path.exists(cache_path):
+        return {}
+
+    try:
+        with open(cache_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_voice_v0_cache(config, cache_data):
+    cache_path = _get_voice_v0_cache_path(config)
+    temp_path = f"{cache_path}.tmp"
+    with open(temp_path, "w", encoding="utf-8") as f:
+        json.dump(cache_data, f, ensure_ascii=False, indent=2)
+    os.replace(temp_path, cache_path)
+
+
+def _fingerprint_voice_text(text):
+    return hashlib.sha256((text or "").encode("utf-8", errors="ignore")).hexdigest()
 
 
 def _words_to_base_segments(words_list):
@@ -265,7 +298,7 @@ def get_director_timeline(voice_text, broll_text, config, log_cb, voice_name):
         json_str = re.sub(r',\s*([\]}])', r'\1', json_str)
         return json.loads(json_str)
 
-    url_kie = "https://api.kie.ai/gemini-2.5-flash/v1/chat/completions"
+    url_kie = "https://api.kie.ai/gemini-3-flash/v1/chat/completions"
     headers = {"Authorization": f"Bearer {config.get('kie_key')}", "Content-Type": "application/json"}
 
     # =========================================================
@@ -286,7 +319,7 @@ VÒNG 1 - TÌM KIẾM ỨNG VIÊN:
 4. BẮT BUỘC trả về ĐÚNG CÚ PHÁP JSON (có dấu ngoặc kép ở các key):
 [ {{"start": 0.0, "end": 2.5, "text": "...", "candidates": ["vid1.mp4", "vid2.mp4"]}} ]"""
             
-    payload_1 = {"model": "gemini-2.5-flash", "messages": [{"role": "user", "content": prompt_1}], "temperature": 0.5}
+    payload_1 = {"model": "gemini-3-flash", "messages": [{"role": "user", "content": prompt_1}], "temperature": 0.5}
     
     raw_timeline = []
     for attempt in range(3): # Vòng lặp tái sinh
@@ -325,7 +358,7 @@ VÒNG 2 - CHỐT HẠ CHUỖI VIDEO:
 4. BẮT BUỘC trả về ĐÚNG CÚ PHÁP JSON (có dấu ngoặc kép ở các key):
 [ {{"start": 0.0, "end": 4.5, "text": "...", "video_files": ["vid_1.mp4", "vid_2.mp4"]}} ]"""
 
-    payload_2 = {"model": "gemini-2.5-flash", "messages": [{"role": "user", "content": prompt_2}], "temperature": 0.2}
+    payload_2 = {"model": "gemini-3-flash", "messages": [{"role": "user", "content": prompt_2}], "temperature": 0.2}
     
     final_timeline = []
     for attempt in range(3): # Vòng lặp tái sinh
@@ -421,26 +454,103 @@ def optimize_voice_timeline_by_ai(raw_voice_text, config, log_cb, voice_name):
         json_str = re.sub(r',\s*([\]}])', r'\1', json_str)
         return json.loads(json_str)
 
+    def merge_micro_segments_only(segments, short_max=3.0):
+        if not segments:
+            return []
+
+        merged = []
+        i = 0
+        while i < len(segments):
+            current = {
+                "start": float(segments[i].get("start", 0.0)),
+                "end": float(segments[i].get("end", 0.0)),
+                "text": _normalize_text(segments[i].get("text", "")),
+            }
+
+            while i + 1 < len(segments):
+                nxt = {
+                    "start": float(segments[i + 1].get("start", current["end"])),
+                    "end": float(segments[i + 1].get("end", current["end"])),
+                    "text": _normalize_text(segments[i + 1].get("text", "")),
+                }
+                if not nxt["text"]:
+                    i += 1
+                    continue
+
+                current_dur = current["end"] - current["start"]
+                next_dur = nxt["end"] - nxt["start"]
+                combined_dur = nxt["end"] - current["start"]
+                gap = max(0.0, nxt["start"] - current["end"])
+
+                if gap > 1.0:
+                    break
+
+                short_pair = current_dur <= short_max or next_dur <= short_max
+                should_merge = short_pair and _segments_related(current["text"], nxt["text"]) and combined_dur <= max(6.0, short_max * 2)
+
+                if not should_merge:
+                    break
+
+                current["end"] = nxt["end"]
+                current["text"] = _normalize_text(current["text"].rstrip(", ") + " " + nxt["text"])
+                i += 1
+
+            merged.append(current)
+            i += 1
+
+        return merged
+
+    def has_short_segments(segments, short_max=3.0):
+        return any((float(item.get("end", 0.0)) - float(item.get("start", 0.0))) <= short_max for item in segments)
+
+    def build_tail_prompt(tail_voice_text):
+        return f"""Đây là phần kịch bản giọng đọc SAU hook đầu đã cố định.
+
+YÊU CẦU:
+1. Chỉ làm mượt các đoạn bị ngắn quá, ưu tiên những đoạn khoảng 2-3 giây.
+2. Không cố nối các đoạn dài; nếu hai đoạn khác ý rõ ràng thì giữ riêng.
+3. Không được tạo thêm nội dung mới.
+4. Chỉ trả về JSON array đúng cú pháp, dạng:
+[ {{\"start\": 0.0, \"end\": 3.2, \"text\": \"...\"}} ]
+
+NỘI DUNG CẦN XỬ LÝ:
+{tail_voice_text}"""
+
     parsed_items = _parse_timeline_text(raw_voice_text)
     if parsed_items:
-        raw_voice_text = _format_timeline_text(_merge_related_short_segments(parsed_items, target_min=4.0, target_max=6.0))
+        cache_key = _fingerprint_voice_text(raw_voice_text)
+        cache_data = _load_voice_v0_cache(config)
+        cached_text = cache_data.get(cache_key)
+        if isinstance(cached_text, str) and cached_text.strip():
+            log_cb(f"[{voice_name}] VÒNG 0: Dùng cache đã tối ưu, bỏ qua gọi AI.")
+            return cached_text
 
-    log_cb(f"[{voice_name}] VÒNG 0: Đang nhờ AI Biên Tập gom các câu ngắn lại cho mượt...")
+        hook_item = parsed_items[:1]
+        hook_text = _format_timeline_text(hook_item)
+        tail_items = parsed_items[1:]
+
+        # Hook đầu giữ nguyên, chỉ nắn lại các đoạn sau nếu chúng thực sự ngắn.
+        tail_items = merge_micro_segments_only(tail_items, short_max=3.0)
+        tail_text = _format_timeline_text(tail_items)
+        if not has_short_segments(tail_items, short_max=3.0):
+            optimized_text = f"{hook_text}{tail_text}"
+            cache_data[cache_key] = optimized_text
+            _save_voice_v0_cache(config, cache_data)
+            log_cb(f"[{voice_name}] VÒNG 0: Không có đoạn quá ngắn ở phần sau, dùng bản đã rút gọn cục bộ và lưu cache.")
+            return optimized_text
+
+        raw_voice_text = tail_text
+    else:
+        cache_data = {}
+        hook_text = ""
+        tail_text = raw_voice_text
+
+    log_cb(f"[{voice_name}] VÒNG 0: Đang làm mượt phần sau hook đầu, chỉ ưu tiên đoạn ngắn 2-3s...")
     
-    prompt_0 = f"""Dưới đây là kịch bản giọng đọc dạng Text kèm thời gian (start - end) bị ngắt quá vụn vặt:
-{raw_voice_text}
+    prompt_0 = build_tail_prompt(raw_voice_text)
 
-NHIỆM VỤ CỦA BẠN:
-1. Đọc, hiểu ngữ cảnh và GHÉP các từ/câu ngắn liên tiếp lại thành các câu dài hơn, có ý nghĩa trọn vẹn và ngữ pháp chuẩn.
-2. TỐI ƯU THỜI LƯỢNG: Ưu tiên ghép sao cho mỗi câu sau khi gộp dài khoảng 4 ĐẾN 6 GIÂY là đẹp nhất.
-3. Nếu câu vẫn quá ngắn nhưng cùng ý rõ ràng với câu kế bên thì tiếp tục ghép; nếu khác ý thì giữ riêng.
-4. TÍNH TOÁN THỜI GIAN: 'start' là thời gian của phần tử đầu tiên, 'end' là thời gian của phần tử cuối cùng trong nhóm được ghép.
-5. Không được tạo thêm nội dung mới, chỉ được nối và làm mượt câu gốc.
-6. BẮT BUỘC trả về ĐÚNG CÚ PHÁP JSON (có dấu ngoặc kép ở các key):
-[ {{"start": 0.0, "end": 4.5, "text": "Nội dung câu đã được ghép mượt mà..."}}, ... ]"""
-
-    payload_0 = {"model": "gemini-2.5-flash", "messages": [{"role": "user", "content": prompt_0}], "temperature": 0.2}
-    url_kie = "https://api.kie.ai/gemini-2.5-flash/v1/chat/completions"
+    payload_0 = {"model": "gemini-3-flash", "messages": [{"role": "user", "content": prompt_0}], "temperature": 0.2}
+    url_kie = "https://api.kie.ai/gemini-3-flash/v1/chat/completions"
     headers = {"Authorization": f"Bearer {config.get('kie_key')}", "Content-Type": "application/json"}
 
     optimized_text = ""
@@ -452,13 +562,19 @@ NHIỆM VỤ CỦA BẠN:
             
             raw_out = res.json()["choices"][0]["message"]["content"]
             final_json = extract_json_array(raw_out)
-            final_json = _merge_related_short_segments(final_json, target_min=4.0, target_max=6.0)
+            final_json = merge_micro_segments_only(final_json, short_max=3.0)
             optimized_text = _format_timeline_text(final_json)
             break
         except Exception as e:
             if attempt == 2:
                 log_cb(f"[{voice_name}] ⚠️ Vòng 0 thất bại. Bỏ qua và dùng kịch bản gốc.")
-                return raw_voice_text # Lỗi thì trả về kịch bản gốc, không làm gián đoạn
+                return f"{hook_text}{tail_text}" # Lỗi thì trả về kịch bản gốc, không làm gián đoạn
             log_cb(f"[{voice_name}] ⚠️ Vòng 0 AI gom câu bị vấp, đang thử lại (Lần {attempt+2}/3)...")
 
-    return optimized_text if optimized_text else raw_voice_text
+    final_text = optimized_text if optimized_text else tail_text
+    if parsed_items:
+        final_text = f"{hook_text}{_format_timeline_text(_parse_timeline_text(final_text))}" if final_text else f"{hook_text}{tail_text}"
+        cache_data[cache_key] = final_text
+        _save_voice_v0_cache(config, cache_data)
+
+    return final_text if final_text else raw_voice_text

@@ -7,6 +7,7 @@ from datetime import datetime
 import subprocess
 import gc
 import re
+import tempfile
 import unicodedata
 from PIL import Image, ImageTk
 
@@ -57,13 +58,15 @@ class BRollTab:
         
         tk.Label(left_frame, text="📁 KHO PROJECT", font=("Arial", 12, "bold"), bg="#ffffff", fg="#2c3e50").pack(pady=10)
         
-        self.tree_proj = ttk.Treeview(left_frame, columns=("name",), show="headings", selectmode="browse")
+        self.tree_proj = ttk.Treeview(left_frame, columns=("name",), show="headings", selectmode="extended")
         self.tree_proj.heading("name", text="Tên Project")
         self.tree_proj.column("name", width=250, anchor="w")
         self.tree_proj.pack(fill="both", expand=True, padx=5, pady=5)
         self.tree_proj.bind("<<TreeviewSelect>>", self.on_select_project)
+        self.tree_proj.bind("<B1-Motion>", self._drag_select_projects)
         
         tk.Button(left_frame, text="➕ TẠO PROJECT TRỐNG", bg="#27ae60", fg="white", font=("Arial", 9, "bold"), pady=8, command=self.add_project_dialog).pack(fill="x", padx=5, pady=5)
+        tk.Button(left_frame, text="🚚 Chuyển Tài Khoản", bg="#2980b9", fg="white", font=("Arial", 9, "bold"), command=self.move_project_dialog).pack(fill="x", padx=5, pady=(0, 5))
         # ... (Dưới nút Xóa Project ở Cột Trái)
         tk.Button(left_frame, text="🗑️ Xóa Project", bg="#e74c3c", fg="white", font=("Arial", 9, "bold"), command=self.delete_project).pack(fill="x", padx=5, pady=(0, 5))
         
@@ -576,7 +579,19 @@ class BRollTab:
         self.update_missing_desc_count()
 
 
+    def _drag_select_projects(self, event):
+        item = self.tree_proj.identify_row(event.y)
+        if item:
+            self.tree_proj.selection_add(item)
+
+    def _get_selected_project_ids(self):
+        selected_ids = list(self.tree_proj.selection())
+        if selected_ids:
+            return selected_ids
+        return [self.current_project_id] if self.current_project_id else []
+
     def refresh_project_list(self):
+        previous_selection = set(self._get_selected_project_ids())
         for item in self.tree_proj.get_children(): self.tree_proj.delete(item)
         sorted_projects = sorted(self.main_app.projects.items(), key=lambda x: x[1]['created_at'], reverse=True)
         for pid, pdata in sorted_projects:
@@ -584,6 +599,10 @@ class BRollTab:
             # Hiện icon khóa nếu đang ẩn
             if pdata.get('status') == 'disabled': name = f"⏸️ {name} (Đã Ẩn)"
             self.tree_proj.insert("", "end", iid=pid, values=(name,))
+
+        valid_selection = [pid for pid in previous_selection if pid in self.main_app.projects]
+        if valid_selection:
+            self.tree_proj.selection_set(valid_selection)
 
     def _get_voice_status_store(self, project_id):
         return self.voice_status_by_project.setdefault(project_id, {})
@@ -677,6 +696,25 @@ class BRollTab:
             self.refresh_project_list()
             self.tree_proj.selection_set(self.current_project_id)
 
+    def _bulk_toggle_project_status(self):
+        selected_ids = self._get_selected_project_ids()
+        if not selected_ids:
+            return messagebox.showwarning("Chú ý", "Bác chưa chọn project nào để đóng băng / mở khóa!")
+
+        for pid in selected_ids:
+            if pid not in self.main_app.projects:
+                continue
+            proj = self.main_app.projects[pid]
+            current_status = proj.get("status", "active")
+            proj["status"] = "disabled" if current_status == "active" else "active"
+
+        self.main_app.save_projects()
+        self.refresh_project_list()
+        if self.current_project_id in self.main_app.projects:
+            self.tree_proj.selection_set(selected_ids)
+            self.tree_proj.focus(self.current_project_id)
+        self.main_app.tab2.update_combo_projects()
+
     def import_broll(self):
         if not self.current_project_id: return
         files = filedialog.askopenfilenames(title="Chọn Video", filetypes=[("Video", "*.mp4 *.mov")])
@@ -699,7 +737,7 @@ class BRollTab:
         p_data = self.main_app.get_project_data(self.current_project_id)
         voice_usage = p_data.get("voice_usage", {})
         voice_files = sorted(
-            [f for f in os.listdir(voice_dir) if f.lower().endswith(('.mp3', '.wav', '.m4a'))],
+            [f for f in os.listdir(voice_dir) if f.lower().endswith(('.mp3', '.wav', '.m4a', '.mp4', '.mov', '.mkv', '.avi', '.webm', '.m4v'))],
             key=str.lower,
         )
         
@@ -743,6 +781,82 @@ class BRollTab:
         normalized_text = normalized_text.lower()
         normalized_text = re.sub(r"[^a-z0-9\s]", " ", normalized_text)
         return re.sub(r"\s+", " ", normalized_text).strip()
+
+    def _is_video_file(self, file_path):
+        return os.path.splitext(file_path)[1].lower() in (".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v")
+
+    def _prepare_voice_source_for_transcription(self, voice_path):
+        """Nếu input là video thì tách audio ra file tạm mp3 để gửi đi bóc băng."""
+        if not self._is_video_file(voice_path):
+            return voice_path, None
+
+        fd, temp_audio_path = tempfile.mkstemp(suffix=".mp3")
+        os.close(fd)
+
+        command = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            voice_path,
+            "-vn",
+            "-acodec",
+            "libmp3lame",
+            "-q:a",
+            "2",
+            temp_audio_path,
+        ]
+
+        creation_flags = 0x08000000 if os.name == 'nt' else 0
+        try:
+            subprocess.run(
+                command,
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=creation_flags,
+            )
+            return temp_audio_path, temp_audio_path
+        except Exception:
+            if os.path.exists(temp_audio_path):
+                try:
+                    os.remove(temp_audio_path)
+                except OSError:
+                    pass
+            raise
+
+    def _save_media_as_mp3(self, source_path, target_dir):
+        """Lưu media vào Voices dưới dạng mp3; nếu đã là mp3 thì copy nguyên file."""
+        base_name, extension = os.path.splitext(os.path.basename(source_path))
+        extension = extension.lower()
+        target_name = f"{base_name}.mp3"
+        target_path = os.path.join(target_dir, target_name)
+
+        if extension == ".mp3":
+            shutil.copy2(source_path, target_path)
+            return target_name, target_path
+
+        command = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            source_path,
+            "-vn",
+            "-acodec",
+            "libmp3lame",
+            "-q:a",
+            "2",
+            target_path,
+        ]
+
+        creation_flags = 0x08000000 if os.name == 'nt' else 0
+        subprocess.run(
+            command,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=creation_flags,
+        )
+        return target_name, target_path
 
     def _looks_like_voice_test_intro(self, text):
         normalized_text = self._normalize_voice_marker_text(text)
@@ -852,25 +966,41 @@ class BRollTab:
         log_cb = lambda msg, pid=project_id: self._log_extract(msg, project_id=pid)
 
         srt_text = ""
-        for attempt in range(3):
-            srt_text = get_transcription(voice_path, voice_name, mode, self.main_app.config, log_cb)
-            trim_start_seconds = self._detect_voice_test_intro_end(srt_text)
+        transcribe_path = voice_path
+        temp_audio_path = None
 
-            if trim_start_seconds <= 0:
-                break
+        try:
+            try:
+                transcribe_path, temp_audio_path = self._prepare_voice_source_for_transcription(voice_path)
+            except Exception as exc:
+                self._log_extract(f"❌ Không tách được audio từ {voice_name}: {str(exc)[:120]}", project_id=project_id)
+                raise
 
-            self._log_extract(
-                f"✂️ Phát hiện câu test ở đầu {voice_name}, cắt {trim_start_seconds:.2f}s...",
-                project_id=project_id,
-            )
-            if not self._trim_voice_file(voice_path, trim_start_seconds):
-                break
+            for attempt in range(3):
+                srt_text = get_transcription(transcribe_path, voice_name, mode, self.main_app.config, log_cb)
+                trim_start_seconds = self._detect_voice_test_intro_end(srt_text)
+
+                if trim_start_seconds <= 0 or temp_audio_path:
+                    break
+
+                self._log_extract(
+                    f"✂️ Phát hiện câu test ở đầu {voice_name}, cắt {trim_start_seconds:.2f}s...",
+                    project_id=project_id,
+                )
+                if not self._trim_voice_file(voice_path, trim_start_seconds):
+                    break
+        finally:
+            if temp_audio_path and os.path.exists(temp_audio_path):
+                try:
+                    os.remove(temp_audio_path)
+                except OSError:
+                    pass
 
         return srt_text
 
     def import_voice(self):
         if not self.current_project_id: return
-        files = filedialog.askopenfilenames(title="Chọn Voice", filetypes=[("Audio", "*.mp3 *.wav *.m4a")])
+        files = filedialog.askopenfilenames(title="Chọn Voice / Video", filetypes=[("Media", "*.mp3 *.wav *.m4a *.mp4 *.mov *.mkv *.avi *.webm *.m4v")])
         if files:
             project_id = self.current_project_id
             voice_dir = os.path.join(self.main_app.get_proj_dir(self.current_project_id), "Voices")
@@ -884,8 +1014,7 @@ class BRollTab:
                 p_data["voice_srt_cache"] = {}
                 
             for f in files: 
-                file_name = os.path.basename(f)
-                shutil.copy2(f, os.path.join(voice_dir, file_name))
+                file_name, _ = self._save_media_as_mp3(f, voice_dir)
                 self._set_voice_status(project_id, file_name, "⏳ Chờ bóc SRT")
                 
                 # Khai báo lính mới
@@ -897,7 +1026,7 @@ class BRollTab:
             
             # 3. [MỚI] Bắt đầu extract SRT cho từng voice mới (chạy background)
             for f in files:
-                file_name = os.path.basename(f)
+                file_name = os.path.splitext(os.path.basename(f))[0] + ".mp3"
                 file_path = os.path.join(voice_dir, file_name)
                 thread = threading.Thread(target=self._extract_voice_srt_async, args=(project_id, file_name, file_path), daemon=True)
                 thread.start()
@@ -1027,34 +1156,104 @@ class BRollTab:
         self.lbl_ref1.config(text=self._format_ref_image_name(ref1), fg="#27ae60" if ref1 else "gray")
         self.lbl_ref2.config(text=self._format_ref_image_name(ref2), fg="#27ae60" if ref2 else "gray")
 
-    def delete_project(self):
-        if not self.current_project_id: return
-        if messagebox.askyesno("Xóa", "Xóa toàn bộ Project và File trong thư mục Tool?"):
-            project_id = self.current_project_id
-            shutil.rmtree(self.main_app.get_proj_dir(project_id), ignore_errors=True)
-            del self.main_app.projects[project_id]
-            self.main_app.save_projects()
-            self.refresh_project_list()
+    def _reset_project_view(self, project_id=None):
+        if project_id:
             self._clear_ai_task_states_for_project(project_id)
             self.voice_status_by_project.pop(project_id, None)
-            
-            self.current_project_id = None
-            self.active_page = 1
-            self.trash_page = 1
-            self.filtered_act_files = []
-            self.filtered_tr_files = []
-            self.render_request_id += 1
-            self.lbl_proj_name.config(text="Chưa chọn Project nào")
-            for item in self.tree_voices.get_children(): self.tree_voices.delete(item)
-            for widget in self.frame_act.winfo_children(): widget.destroy()
-            for widget in self.frame_tr.winfo_children(): widget.destroy()
-            self.txt_context.delete("1.0", tk.END)
-            self.ent_product_name.delete(0, tk.END)
-            self.var_shopee_out_of_stock.set(False)
-            self._update_pagination_ui("active", 0, 1, 1)
-            self._update_pagination_ui("trash", 0, 1, 1)
-            for entry in self.product_link_entries:
-                entry.delete(0, tk.END)
+
+        self.current_project_id = None
+        self.active_page = 1
+        self.trash_page = 1
+        self.filtered_act_files = []
+        self.filtered_tr_files = []
+        self.render_request_id += 1
+        self.lbl_proj_name.config(text="Chưa chọn Project nào")
+        for item in self.tree_voices.get_children(): self.tree_voices.delete(item)
+        for widget in self.frame_act.winfo_children(): widget.destroy()
+        for widget in self.frame_tr.winfo_children(): widget.destroy()
+        self.txt_context.delete("1.0", tk.END)
+        self.ent_product_name.delete(0, tk.END)
+        self.var_shopee_out_of_stock.set(False)
+        self._update_pagination_ui("active", 0, 1, 1)
+        self._update_pagination_ui("trash", 0, 1, 1)
+        for entry in self.product_link_entries:
+            entry.delete(0, tk.END)
+        self.lbl_ref1.config(text="Chưa chọn", fg="gray")
+        self.lbl_ref2.config(text="Chưa chọn", fg="gray")
+
+    def move_project_dialog(self):
+        selected_ids = self._get_selected_project_ids()
+        if not selected_ids:
+            return messagebox.showwarning("Chú ý", "Bác phải chọn ít nhất 1 project trước đã!")
+
+        current_profile = self.main_app.get_active_profile_name()
+        available_profiles = [p for p in self.main_app.get_available_profiles() if p != current_profile]
+        if not available_profiles:
+            return messagebox.showwarning("Thiếu tài khoản", "Bác cần tạo ít nhất 2 tài khoản thì mới chuyển project được.")
+
+        popup = tk.Toplevel(self.parent)
+        popup.title("Chuyển Tài Khoản")
+        popup.configure(bg="#ffffff")
+        popup.resizable(False, False)
+        popup.transient(self.parent.winfo_toplevel())
+        popup.grab_set()
+
+        tk.Label(popup, text=f"Chuyển {len(selected_ids)} project đã chọn", bg="#ffffff", fg="#2c3e50", font=("Arial", 11, "bold")).pack(padx=18, pady=(16, 8))
+        tk.Label(popup, text=f"Đang ở tài khoản: {current_profile}", bg="#ffffff", fg="#7f8c8d", font=("Arial", 9)).pack(padx=18, pady=(0, 10))
+
+        target_var = tk.StringVar(value=available_profiles[0])
+        cmb_target = ttk.Combobox(popup, textvariable=target_var, state="readonly", values=available_profiles, width=28, font=("Arial", 10))
+        cmb_target.pack(padx=18, pady=(0, 14))
+
+        btn_frame = tk.Frame(popup, bg="#ffffff")
+        btn_frame.pack(pady=(0, 16))
+
+        def confirm_move():
+            target_profile = target_var.get().strip()
+            if not target_profile:
+                return messagebox.showwarning("Thiếu chọn", "Bác chưa chọn tài khoản đích.", parent=popup)
+
+            self.save_all_descriptions()
+            self.save_project_context()
+            self.save_product_info()
+
+            failed_messages = []
+            moved_count = 0
+            for pid in list(selected_ids):
+                ok, msg = self.main_app.move_project_to_profile(pid, target_profile)
+                if ok:
+                    moved_count += 1
+                else:
+                    failed_messages.append(msg)
+
+            popup.destroy()
+            self.refresh_project_list()
+            self._reset_project_view(self.current_project_id)
+            self.main_app.tab2.update_combo_projects()
+            if hasattr(self.main_app, 'tab11'):
+                self.main_app.tab11.refresh_jobs_preview()
+
+            if failed_messages:
+                summary = f"Đã chuyển {moved_count}/{len(selected_ids)} project.\n\n" + "\n".join(failed_messages[:6])
+                return messagebox.showwarning("Chuyển chưa trọn vẹn", summary)
+
+            messagebox.showinfo("Thành công", f"Đã chuyển thành công {moved_count} project sang tài khoản {target_profile}.")
+
+        tk.Button(btn_frame, text="Xác nhận", bg="#27ae60", fg="white", font=("Arial", 9, "bold"), width=12, command=confirm_move).pack(side="left", padx=5)
+        tk.Button(btn_frame, text="Hủy", bg="#95a5a6", fg="white", font=("Arial", 9, "bold"), width=10, command=popup.destroy).pack(side="left", padx=5)
+
+    def delete_project(self):
+        selected_ids = self._get_selected_project_ids()
+        if not selected_ids:
+            return
+        if messagebox.askyesno("Xóa", f"Xóa toàn bộ {len(selected_ids)} project đã chọn và file trong thư mục Tool?"):
+            for project_id in list(selected_ids):
+                shutil.rmtree(self.main_app.get_proj_dir(project_id), ignore_errors=True)
+                if project_id in self.main_app.projects:
+                    del self.main_app.projects[project_id]
+            self.main_app.save_projects()
+            self.refresh_project_list()
+            self._reset_project_view(self.current_project_id)
 
     def move_to_trash(self, vid_name, refresh=True):
         self.save_all_descriptions() 
@@ -1594,18 +1793,7 @@ class BRollTab:
     # [TÍNH NĂNG MỚI] ĐÓNG BĂNG VÀ ĐẾM MÔ TẢ
     # =======================================================
     def toggle_project_status(self):
-        if not self.current_project_id: return
-        proj = self.main_app.projects[self.current_project_id]
-        current_status = proj.get("status", "active")
-        
-        # Đảo ngược trạng thái
-        proj["status"] = "disabled" if current_status == "active" else "active"
-        self.main_app.save_projects()
-        
-        # Load lại giao diện
-        self.refresh_project_list()
-        self.tree_proj.selection_set(self.current_project_id)
-        self.main_app.tab2.update_combo_projects() # Cập nhật sang Tab 2
+        self._bulk_toggle_project_status()
 
     def update_missing_desc_count(self):
         """ Đếm xem còn bao nhiêu ô chưa gõ chữ """

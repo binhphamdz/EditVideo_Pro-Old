@@ -74,6 +74,7 @@ class ManagerTab:
         self.context_menu = tk.Menu(self.parent, tearoff=0, font=("Arial", 11))
         self.context_menu.add_command(label="▶ Xem Video này", command=self.open_video)
         self.context_menu.add_command(label="☁️ Gửi iPhone (Các video đang bôi đen)", command=self.send_selected_to_iphone)
+        self.context_menu.add_command(label="🔀 Đảo lộn + Thêm số (Các video đang bôi đen)", command=self.export_selected_for_3utools)
         self.context_menu.add_separator()
         self.context_menu.add_command(label="🗑️ Xóa sạch khỏi máy", command=self.delete_video)
         
@@ -93,6 +94,17 @@ class ManagerTab:
             pady=5,
             command=self.send_selected_to_iphone
         ).pack(side="left")
+
+        tk.Button(
+            btn_frame,
+            text="🔀 ĐẢO LỘN + SỐ",
+            bg="#e67e22",
+            fg="white",
+            font=("Arial", 12, "bold"),
+            padx=18,
+            pady=5,
+            command=self.export_selected_for_3utools
+        ).pack(side="left", padx=10)
 
         # =======================================================
         # [MỚI] NÚT BẬT TRẠM PHÁT SÓNG WIFI NỘI BỘ
@@ -147,6 +159,9 @@ class ManagerTab:
             
         # 2. CHỐT CHẶN TIÊU ĐỀ: Nếu file chưa có hoặc bị xóa trắng, tự động tạo file và nạp Tên Cột vào
         header = ["Ngày Tạo", "Tên Project", "File Voice", "Đường Dẫn", "Trạng Thái"]
+        excel_dir = os.path.dirname(EXCEL_LOG_FILE)
+        if excel_dir:
+            os.makedirs(excel_dir, exist_ok=True)
         if not os.path.exists(EXCEL_LOG_FILE) or os.path.getsize(EXCEL_LOG_FILE) == 0:
             with open(EXCEL_LOG_FILE, 'w', encoding='utf-8-sig', newline='') as f:
                 writer = csv.writer(f)
@@ -198,38 +213,69 @@ class ManagerTab:
         target_dir = os.path.join(icloud_dir, folder_name)
         os.makedirs(target_dir, exist_ok=True)
         
-        success_count = 0
-        file_timestamp = datetime.now().strftime("%Y%m%d_%H%M") 
-
-        # ========================================================
-        # [MỚI] ÉP IPHONE XẾP XEN KẼ VIDEO
-        # ========================================================
-        import random
-        # Chuyển tuple sang list để xáo trộn
-        items_list = list(selected_items)
-        random.shuffle(items_list)
-
-        # Dùng enumerate để sinh số thứ tự (1, 2, 3...)
-        for idx, item_id in enumerate(items_list, 1):
-            values = list(self.tree.item(item_id)['values'])
-            path = values[3]
-            
-            if os.path.exists(path):
-                original_name = os.path.basename(path)
-                # Đắp thêm số thứ tự {idx:02d} (vd: 01, 02, 03) vào tên file
-                new_name = f"{idx:02d}_[{file_timestamp}]_{original_name}"
-                target_path = os.path.join(target_dir, new_name)
-                
-                try:
-                    shutil.copy2(path, target_path)
-                    self.update_excel_status(path, "Đã chuyển")
-                    success_count += 1
-                except Exception as e: 
-                    print(f"Lỗi khi copy {original_name}: {e}")
-                    continue
+        success_count = self._copy_selected_files_shuffled(selected_items, target_dir, mark_as="Đã chuyển")
         
         self.load_excel_data() 
         messagebox.showinfo("Thành công", f"Báo cáo sếp: Đã tạo thư mục '{folder_name}' và bắn {success_count} video đã xáo trộn vào đó an toàn!")
+
+    def export_selected_for_3utools(self):
+        import random
+        selected_items = self.tree.selection()
+
+        if not selected_items:
+            messagebox.showwarning("Chú ý", "Bác phải bôi đen các video muốn đảo lộn đã chứ!")
+            return
+
+        file_timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+        items_list = list(selected_items)
+        random.shuffle(items_list)
+
+        success_count = 0
+        for idx, item_id in enumerate(items_list, 1):
+            path = self.tree.item(item_id)['values'][3]
+            if os.path.exists(path):
+                folder = os.path.dirname(path)
+                original_name = os.path.basename(path)
+                new_name = f"{idx:02d}_[{file_timestamp}]_{original_name}"
+                new_path = os.path.join(folder, new_name)
+                try:
+                    os.rename(path, new_path)
+                    self.update_excel_path(path, new_path)
+                    success_count += 1
+                except Exception as e:
+                    print(f"Lỗi rename {original_name}: {e}")
+
+        self.load_excel_data()
+        messagebox.showinfo("Xong!", f"Đã đảo lộn và thêm số cho {success_count} file ngay tại chỗ!")
+
+    def _copy_selected_files_shuffled(self, selected_items, target_dir, mark_as=None):
+        import random
+
+        success_count = 0
+        file_timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+
+        items_list = list(selected_items)
+        random.shuffle(items_list)
+
+        for idx, item_id in enumerate(items_list, 1):
+            values = list(self.tree.item(item_id)['values'])
+            path = values[3]
+
+            if os.path.exists(path):
+                original_name = os.path.basename(path)
+                new_name = f"{idx:02d}_[{file_timestamp}]_{original_name}"
+                target_path = os.path.join(target_dir, new_name)
+
+                try:
+                    shutil.copy2(path, target_path)
+                    if mark_as:
+                        self.update_excel_status(path, mark_as)
+                    success_count += 1
+                except Exception as e:
+                    print(f"Lỗi khi copy {original_name}: {e}")
+                    continue
+
+        return success_count
 
     def auto_sync_icloud(self, bot=None, chat_id=None):
         from main import EXCEL_LOG_FILE
@@ -295,6 +341,23 @@ class ManagerTab:
                 f"📱 Bác mở app Tệp (Files) trên iPhone đợi xíu là có hàng, chọn video từ trên xuống dưới là tự xen kẽ nhé!"
             )
             
+
+    def update_excel_path(self, old_path, new_path):
+        from main import EXCEL_LOG_FILE
+        header = ["Ngày Tạo", "Tên Project", "File Voice", "Đường Dẫn", "Trạng Thái"]
+        rows = []
+        if os.path.exists(EXCEL_LOG_FILE):
+            with open(EXCEL_LOG_FILE, 'r', encoding='utf-8-sig') as f:
+                reader = csv.reader(f)
+                next(reader, None)
+                for r in reader:
+                    if len(r) >= 4 and r[3] == old_path:
+                        r[3] = new_path
+                    rows.append(r)
+            with open(EXCEL_LOG_FILE, 'w', encoding='utf-8-sig', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(header)
+                writer.writerows(rows)
 
     def update_excel_status(self, file_path, new_status):
         from main import EXCEL_LOG_FILE
