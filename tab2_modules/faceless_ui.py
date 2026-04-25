@@ -349,7 +349,7 @@ class FacelessTab:
         all_voices.sort(key=get_usage_for_bot)
         
         # (Tùy chọn) Sếp có thể giới hạn Bot chỉ render 5-10 video mỗi lần gọi để tránh quá tải
-        # all_voices = all_voices[:5] 
+        all_voices = all_voices[:3] 
 
         # Truyền đường dẫn gốc để Bot hiểu
         self.main_app.config["app_base_path"] = BASE_PATH 
@@ -372,18 +372,40 @@ class FacelessTab:
             if not selected_trans:
                 return messagebox.showwarning("Lỗi", "Vui lòng chọn ít nhất 1 Hiệu Ứng Chuyển Cảnh!")
         
-        # [CẬP NHẬT] Gọi hàm auto-save để lưu toàn bộ config
+        # Lưu config
         self._save_config_auto()
         if self.use_trans.get():
-            self._save_selected_transitions()  # [MỚI] Lưu transitions
+            self._save_selected_transitions()
         self.main_app.config["app_base_path"] = BASE_PATH
         self.main_app.save_config()
 
+        # 1. Lấy danh sách Voice sếp đã bôi đen
         voices = [self.lst_voices.get(i) for i in selected_indices]
+        
+        # =======================================================
+        # [BẢN ĐỘ MỚI] DẠY CHO NÚT RENDER BIẾT CÁCH ƯU TIÊN FILE ÍT DÙNG
+        # =======================================================
         import random
-        random.shuffle(voices)
+        random.shuffle(voices) # Xáo trộn ngẫu nhiên để chống lặp thứ tự
+        
+        pid = self.pid_map[proj_name]
+        project_data = self.main_app.get_project_data(pid)
+        voice_usage = project_data.get("voice_usage", {})
 
-        proj_dir = self.main_app.get_proj_dir(self.pid_map[proj_name])
+        def get_usage_for_gui(v_name):
+            for k, v in voice_usage.items():
+                if k.lower() == v_name.lower():
+                    return int(v)
+            return 0
+            
+        # Thuật toán thần thánh: Đẩy thằng 0-1 lượt lên đầu, đạp thằng 7 lượt xuống đáy
+        voices.sort(key=get_usage_for_gui)
+        
+        # (TÙY CHỌN) Nếu sếp bôi đen 10 file nhưng chỉ muốn nó xào 3 file ít dùng nhất, sếp bỏ dấu # ở dòng dưới:
+        # voices = voices[:3]
+        # =======================================================
+
+        proj_dir = self.main_app.get_proj_dir(pid)
         
         self.btn_run_batch.config(state="disabled", text="⏳ ĐANG RENDER...")
         threading.Thread(target=self._run_multithread_batch, args=(voices, proj_dir, proj_name, None, None), daemon=True).start()

@@ -386,7 +386,13 @@ def render_faceless_video(voice_name, voice_path, timeline, proj_dir, proj_name,
     # =======================================================
     if len(pre_labels) > 1 and use_trans:
         sc_dur = selected_clips[0]['dur']
-        fade_offset = sc_dur - trans_dur
+        
+        # [BẢN ĐỘ MỚI] Bọc lót thời gian chuyển cảnh không được dài hơn video gốc
+        # Nếu trans_dur quá dài, tự động bóp nó lại bằng 1 nửa thời lượng video 1
+        safe_trans_dur = min(trans_dur, sc_dur - 0.2) 
+        if safe_trans_dur <= 0: safe_trans_dur = 0.2
+        
+        fade_offset = max(0.0, sc_dur - safe_trans_dur)
         label_fade = "[vfade0]"
         
         # [MỚI] Ánh xạ UI transitions sang FFmpeg transitions
