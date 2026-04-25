@@ -21,9 +21,37 @@ class ScraperHandler:
         self.ui = ui_tab
         self.folder_id = "1K3iG8kCf8BEGYps9Q1pXWShuukGsEgas" # ID thư mục Drive của sếp
 
-    def json_to_flat_text(self, words_list, output_path):
-        text_content = " ".join([w.get('word', '').strip() for w in words_list if w.get('word', '').strip() not in ['<start>', '<end>', '']])
-        with open(output_path, "w", encoding="utf-8") as f: f.write(text_content)
+    # [BẢN ĐỘ MỚI] - HÀM ĐẶT TÊN ĐỘNG DỰA TRÊN KỊCH BẢN
+    def save_dynamic_script(self, text_content, url, target_dir):
+        # 1. Trích xuất username từ URL (vd: namoinam)
+        username = "TikTok"
+        match = re.search(r'@([\w\.-]+)', url)
+        if match:
+            username = match.group(1)
+
+        # 2. Lấy 6 từ đầu tiên của kịch bản làm tên, bỏ hết các ký tự cấm của Windows
+        clean_text = re.sub(r'[\\/*?:"<>|\n\t]', " ", text_content).strip()
+        words = clean_text.split()[:6] 
+        first_part = "_".join(words)
+        if not first_part:
+            first_part = "Khong_Co_Loi_Thoai"
+
+        # 3. Tạo 5 số ngẫu nhiên tránh trùng lặp
+        rand_nums = str(random.randint(10000, 99999))
+
+        # 4. Gắn tên (BẮT BUỘC có chữ KB_ ở đầu vì Tab 7 chỉ nhận diện file KB_)
+        final_name = f"KB_{username}_{first_part}_{rand_nums}.txt"
+        final_path = os.path.join(target_dir, final_name)
+
+        # Lưu file
+        with open(final_path, "w", encoding="utf-8") as f: 
+            f.write(text_content)
+
+        return final_name
+
+    # Đã sửa lại để hàm này chỉ trả về Text chứ không lưu thẳng file nữa
+    def get_flat_text(self, words_list):
+        return " ".join([w.get('word', '').strip() for w in words_list if w.get('word', '').strip() not in ['<start>', '<end>', '']])
 
     def clean_filename(self, title):
         return re.sub(r'[\\/*?:"<>|]', "", title)[:50].strip()
@@ -99,15 +127,11 @@ class ScraperHandler:
             
             base_name = os.path.splitext(os.path.basename(temp_video))[0]
             temp_audio = os.path.join(target_dir, f"{base_name}_{index}.mp3")
-            txt_output = os.path.join(target_dir, f"KB_{base_name[:15]}_{int(time.time())}.txt")
 
             video = VideoFileClip(temp_video)
             video.audio.write_audiofile(temp_audio, logger=None)
             video.close()
 
-            # =======================================================
-            # [ĐÃ SỬA LẠI] ĐỌC TRỰC TIẾP TỪ NÚT BẤM TRÊN GIAO DIỆN TAB 7
-            # =======================================================
             mode = self.ui.boc_bang_mode.get()
 
             # 2. RẼ NHÁNH BÓC BĂNG
@@ -126,20 +150,18 @@ class ScraperHandler:
                     )
                 
                 if res.status_code == 200:
-                    # Gộp text liền mạch không cần timestamp
                     text_content = " ".join([s['text'].strip() for s in res.json().get("segments", [])])
-                    with open(txt_output, "w", encoding="utf-8") as f: f.write(text_content)
                     
-                    self.ui.add_log(f"✅ LƯU THÀNH CÔNG: {os.path.basename(txt_output)}")
+                    # [MỚI] Gọi hàm tạo tên động và lưu file
+                    final_filename = self.save_dynamic_script(text_content, url, target_dir)
+                    
+                    self.ui.add_log(f"✅ LƯU THÀNH CÔNG: {final_filename}")
                     self.ui.main_app.root.after(0, self.ui.safe_update_listbox)
                     return True
                 else:
                     raise Exception(f"Lỗi Groq: {res.text[:100]}")
 
             else:
-                # =======================================================
-                # [BẢN NÂNG CẤP] CHẾ ĐỘ OHFREE + GOOGLE DRIVE (TỰ XIN TOKEN)
-                # =======================================================
                 self.ui.add_log(f"[{index+1}] Đang kiểm tra quyền Drive & Bóc bằng OhFree...")
                 
                 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -150,30 +172,22 @@ class ScraperHandler:
                 token_path = os.path.join(os.getcwd(), 'token.json')
                 creds = None
 
-                # 1. Thử đọc file token cũ
                 if os.path.exists(token_path):
                     try:
                         creds = Credentials.from_authorized_user_file(token_path, SCOPES)
-                    except:
-                        pass
+                    except: pass
 
-                # 2. Nếu thẻ mất hoặc hỏng -> Tự động bật Web xin thẻ mới
                 if not creds or not creds.valid:
                     if creds and creds.expired and creds.refresh_token:
                         creds.refresh(Request())
                     else:
-                        # Bật trình duyệt để sếp chọn Gmail (Cần file credentials.json nằm cạnh file main.py)
                         flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
                         creds = flow.run_local_server(port=0)
-                    
-                    # Xin được rồi thì lưu lại thành file token.json để lần sau dùng tiếp
                     with open(token_path, 'w') as token:
                         token.write(creds.to_json())
 
-                # 3. Kết nối dịch vụ Drive
                 drive_service = build('drive', 'v3', credentials=creds)
 
-                # --- Tiếp tục quy trình đẩy file lên Drive cũ của sếp ---
                 file_metadata = {'name': f"audio_{index}.mp3", 'parents': [self.folder_id]}
                 file = drive_service.files().create(
                     body=file_metadata, 
@@ -182,16 +196,13 @@ class ScraperHandler:
                 ).execute()
                 
                 file_id = file.get('id')
-                # Cấp quyền xem công khai để OhFree đọc được link
                 drive_service.permissions().create(fileId=file_id, body={'type': 'anyone', 'role': 'reader'}).execute()
 
-                # --- Đoạn gọi API OhFree giữ nguyên như cũ ---
                 headers = {
                     "User-Agent": "Mozilla/5.0...", 
                     "Origin": "https://tts.ohfree.me",
                     "Cookie": cookie
                 }
-                # ... (Các phần còn lại giữ nguyên)
                 
                 res = requests.post(
                     "https://tts.ohfree.me/api/mp3-to-text", 
@@ -201,8 +212,12 @@ class ScraperHandler:
                 )
                 
                 if res.status_code == 200 and res.json().get('success'):
-                    self.json_to_flat_text(res.json().get('data', {}).get('words', []), txt_output)
-                    self.ui.add_log(f"✅ LƯU THÀNH CÔNG: {os.path.basename(txt_output)}")
+                    text_content = self.get_flat_text(res.json().get('data', {}).get('words', []))
+                    
+                    # [MỚI] Gọi hàm tạo tên động và lưu file
+                    final_filename = self.save_dynamic_script(text_content, url, target_dir)
+                    
+                    self.ui.add_log(f"✅ LƯU THÀNH CÔNG: {final_filename}")
                     self.ui.main_app.root.after(0, self.ui.safe_update_listbox)
                     return True
                 else: 
@@ -213,7 +228,6 @@ class ScraperHandler:
             return False
             
         finally:
-            # Quét rác
             for f in [temp_video, temp_audio]:
                 if f and os.path.exists(f):
                     try: os.remove(f)

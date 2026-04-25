@@ -220,13 +220,19 @@ class ManagerTab:
 
     def export_selected_for_3utools(self):
         import random
+        import re
         selected_items = self.tree.selection()
 
         if not selected_items:
-            messagebox.showwarning("Chú ý", "Bác phải bôi đen các video muốn đảo lộn đã chứ!")
+            messagebox.showwarning("Chú ý", "Sếp phải bôi đen các video muốn đảo lộn đã chứ!")
             return
 
-        file_timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+        # 1. Hỏi người dùng chọn thư mục để xuất file ra (Tránh làm hỏng file gốc)
+        export_dir = filedialog.askdirectory(title="Chọn thư mục để xuất video ra (Dành cho 3uTools)")
+        if not export_dir:
+            return
+
+        # 2. Xáo trộn ngẫu nhiên danh sách đã chọn
         items_list = list(selected_items)
         random.shuffle(items_list)
 
@@ -234,19 +240,25 @@ class ManagerTab:
         for idx, item_id in enumerate(items_list, 1):
             path = self.tree.item(item_id)['values'][3]
             if os.path.exists(path):
-                folder = os.path.dirname(path)
                 original_name = os.path.basename(path)
-                new_name = f"{idx:02d}_[{file_timestamp}]_{original_name}"
-                new_path = os.path.join(folder, new_name)
+                
+                # 3. DỌN DẸP TÊN FILE CŨ (Tránh lỗi bị cộng dồn tên dài ngoằng nếu bấm nhiều lần)
+                # Xóa các tiền tố kiểu "01_[20240425_1200]_" hoặc "01_" cũ nếu có
+                clean_name = re.sub(r'^\d{2,}_\[\d{8}_\d{4}\]_', '', original_name)
+                clean_name = re.sub(r'^\d{2,}_', '', clean_name)
+                
+                # 4. Gắn số thứ tự mới để 3uTools không báo trùng và giữ nguyên thứ tự đảo lộn
+                new_name = f"{idx:02d}_{clean_name}"
+                new_path = os.path.join(export_dir, new_name)
+                
                 try:
-                    os.rename(path, new_path)
-                    self.update_excel_path(path, new_path)
+                    # Dùng shutil.copy2 để bảo toàn file gốc trong Tool, chỉ copy bản đã đổi tên ra ngoài
+                    shutil.copy2(path, new_path) 
                     success_count += 1
                 except Exception as e:
-                    print(f"Lỗi rename {original_name}: {e}")
+                    print(f"Lỗi khi copy {original_name}: {e}")
 
-        self.load_excel_data()
-        messagebox.showinfo("Xong!", f"Đã đảo lộn và thêm số cho {success_count} file ngay tại chỗ!")
+        messagebox.showinfo("Hoàn tất!", f"Đã xuất, đảo lộn và gắn số thành công {success_count} file!\n\nSếp mở thư mục:\n{export_dir}\n...rồi kéo thẳng cả thư mục đó thả vào 3uTools là xong nhé!")
 
     def _copy_selected_files_shuffled(self, selected_items, target_dir, mark_as=None):
         import random
