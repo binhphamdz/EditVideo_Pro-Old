@@ -446,8 +446,6 @@ class FacelessTab:
             # 3. Gọi AI Đạo Diễn (Chạy ngoài ổ khóa)
             timeline = get_director_timeline(voice_text, broll_text, self.main_app.config, self.add_log, voice_name)
             
-            # [ĐÃ XÓA Ổ KHÓA SỐ 2 VÔ DỤNG Ở ĐÂY]
-
             # 5. Render Video (BẮT LẤY danh sách Broll thực tế đã bị nhét vào lò)
             actual_used_brolls = render_faceless_video(
                 voice_name, voice_path, timeline, proj_dir, proj_name, 
