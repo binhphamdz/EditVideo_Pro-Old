@@ -254,48 +254,6 @@ class FacelessTab:
         self._sync_transition_controls()
         self._save_config_auto()
 
-    def _update_broll_stats(self, pid, timeline, voice_name):
-        """[MỚI] Cộng usage_count cho các video đã dùng & refresh tab BRoll"""
-        try:
-            with json_save_lock:
-                project_data = self.main_app.get_project_data(pid)
-                total_vids_updated = 0
-                
-                for row in timeline:
-                    # Lấy MẢNG video từ timeline
-                    vid_names = row.get("video_files", [])
-                    
-                    # Backcompat: Hỗ trợ key cũ 'video_file' (lẻ)
-                    if "video_file" in row and row.get("video_file"):
-                        single_vid = row["video_file"]
-                        if isinstance(single_vid, str) and single_vid not in vid_names:
-                            vid_names.append(single_vid)
-                    
-                    # Cộng điểm cho từng video
-                    for vid_name in vid_names:
-                        if vid_name and vid_name in project_data.get('videos', {}):
-                            current_usage = project_data['videos'][vid_name].get('usage_count', 0)
-                            project_data['videos'][vid_name]['usage_count'] = current_usage + 1
-                            total_vids_updated += 1
-                
-                # Lưu dữ liệu
-                self.main_app.save_project_data(pid, project_data)
-            
-            # Log feedback
-            if total_vids_updated > 0:
-                self.add_log(f"✅ [{voice_name}] Cộng điểm ({total_vids_updated} video) & lưu thành công.")
-            else:
-                self.add_log(f"⚠️ [{voice_name}] Không cộng được video nào (timeline có thể không hợp lệ).")
-            
-            # Refresh tab BRoll (nếu đó là project đang xem)
-            if self.main_app.tab1.current_project_id == pid:
-                self.main_app.root.after(0, lambda: self.main_app.tab1.render_video_list())
-                self.add_log(f"🔄 [{voice_name}] Đang cập nhật giao diện BRoll...")
-        
-        except Exception as e:
-            self.add_log(f"❌ Lỗi cập nhật điểm BRoll: {e}")
-            print(f"❌ Lỗi _update_broll_stats: {e}")
-
     def update_combo_projects(self):
         proj_list = []
         self.pid_map = {}
@@ -349,30 +307,56 @@ class FacelessTab:
         self.txt_log.config(state="disabled")
 
     def auto_render_from_bot(self, bot, chat_id):
+        import os
+        import random
+        import threading
+        from paths import BASE_PATH
+
         proj_name = self.combo_proj.get()
-        if not proj_name: return bot.send_message(chat_id, "❌ Bác chưa chọn Project trên Tool!")
-        pid = self.pid_map[proj_name]
+        if not proj_name: 
+            return bot.send_message(chat_id, "❌ Sếp chưa chọn Project trên Tool! Hãy ra màn hình PC chọn Project trước nhé.")
+            
+        pid = self.pid_map.get(proj_name)
+        if not pid:
+            return bot.send_message(chat_id, "❌ Lỗi không tìm thấy ID của Project!")
+
         proj_dir = self.main_app.get_proj_dir(pid)
         voice_dir = os.path.join(proj_dir, "Voices")
-        all_voices = [f for f in os.listdir(voice_dir) if f.lower().endswith(('.mp3', '.wav'))] if os.path.exists(voice_dir) else []
-        if not all_voices: return bot.send_message(chat_id, "❌ Kho Voice trống!")
+        
+        if not os.path.exists(voice_dir):
+            return bot.send_message(chat_id, "❌ Thư mục Voices chưa được tạo!")
+            
+        all_voices = [f for f in os.listdir(voice_dir) if f.lower().endswith(('.mp3', '.wav', '.m4a'))]
+        if not all_voices: 
+            return bot.send_message(chat_id, "❌ Kho Voice trống trơn! Sếp nạp thêm đạn vào đi.")
 
-        # --- [BẢN ĐỘ MỚI] ƯU TIÊN VOICE CHƯA DÙNG / DÙNG ÍT ---
-        import random
+        # Lấy sổ nợ
         project_data = self.main_app.get_project_data(pid)
         voice_usage = project_data.get("voice_usage", {})
-        
-        # Xáo trộn trước để các voice có cùng số lần dùng không ra theo thứ tự chữ cái (ABC)
-        random.shuffle(all_voices)
-        # Sắp xếp lại dựa trên số lần đã dùng (Ít nhất lên đầu)
-        all_voices.sort(key=lambda v: voice_usage.get(v, 0))
-        
-        # (Tùy chọn) Nếu sếp muốn Bot mỗi lần gọi chỉ làm 5 video thì bỏ comment dòng dưới:
-        # all_voices = all_voices[:5]
 
+        # --- [BẢN ĐỘ TỐI THƯỢNG CHO BOT] ---
+        # 1. Trộn bài ngẫu nhiên
+        random.shuffle(all_voices)
+        
+        # 2. Thuật toán lấy số lần dùng siêu chuẩn (Chống lỗi Hoa/Thường + Ép kiểu số)
+        def get_usage_for_bot(v_name):
+            for k, v in voice_usage.items():
+                if k.lower() == v_name.lower():
+                    return int(v)
+            return 0
+            
+        # 3. Ép Bot ưu tiên bốc file ít dùng nhất
+        all_voices.sort(key=get_usage_for_bot)
+        
+        # (Tùy chọn) Sếp có thể giới hạn Bot chỉ render 5-10 video mỗi lần gọi để tránh quá tải
+        # all_voices = all_voices[:5] 
+
+        # Truyền đường dẫn gốc để Bot hiểu
         self.main_app.config["app_base_path"] = BASE_PATH 
 
-        bot.send_message(chat_id, f"🎬 ĐẠO DIỄN AI NHẬN LỆNH!\n📁 Project: {proj_name}\n🎙️ {len(all_voices)} video (Đã ưu tiên Voice mới). Đang xào nấu...")
+        bot.send_message(chat_id, f"🎬 ĐẠO DIỄN AI NHẬN LỆNH!\n📁 Project: {proj_name}\n🎙️ Đã lọc ra {len(all_voices)} video (Ưu tiên Voice mới tinh). Đang đưa vào lò xào nấu...")
+        
+        # Bắn lệnh cho FFmpeg chạy ngầm
         threading.Thread(target=self._run_multithread_batch, args=(all_voices, proj_dir, proj_name, bot, chat_id), daemon=True).start()
 
     def start_batch_process(self):
@@ -438,7 +422,6 @@ class FacelessTab:
             
             # 1. Bóc băng [CẬP NHẬT] Dùng cache từ Tab 1 nếu có sẵn
             try:
-                # [MỚI] Cố gắng dùng cache từ Tab 1
                 voice_text = self.main_app.tab1.get_voice_srt_or_extract(pid, voice_name, voice_path)
                 self.add_log(f"[{voice_name}] ✅ Dùng SRT (cache hoặc extract mới)")
             except Exception as e:
@@ -447,7 +430,7 @@ class FacelessTab:
                 voice_text = get_transcription(voice_path, voice_name, self.main_app.config.get("boc_bang_mode", "groq"), self.main_app.config, self.add_log)
             
             # =======================================================
-            # [Ổ KHÓA SỐ 1] Ghi trí nhớ điểm Broll
+            # [Ổ KHÓA SỐ 1] Ghi trí nhớ điểm Broll gửi cho AI
             # =======================================================
             with json_save_lock:
                 project_data = self.main_app.get_project_data(pid)
@@ -460,36 +443,47 @@ class FacelessTab:
                     usage = info.get('usage_count', 0) 
                     broll_text += f"- File: '{v}' (Dài {dur}s) | Đã dùng: {usage} lần | Mô tả: {desc}\n"
 
-            # 3. Gọi AI Đạo Diễn (Gọi API thì không được bọc khóa vì nó tốn thời gian, để AI tự chạy song song)
+            # 3. Gọi AI Đạo Diễn (Chạy ngoài ổ khóa)
             timeline = get_director_timeline(voice_text, broll_text, self.main_app.config, self.add_log, voice_name)
             
-            # =======================================================
-            # [Ổ KHÓA SỐ 2] Ghi điểm sử dụng Broll và Voice sau khi AI xử lý xong
-            # =======================================================
-            self._update_broll_stats(pid, timeline, voice_name)
+            # [ĐÃ XÓA Ổ KHÓA SỐ 2 VÔ DỤNG Ở ĐÂY]
 
-            # 5. Render Video (Giai đoạn này mất thời gian nên chạy tự do ngoài ổ khóa)
-            render_faceless_video(voice_name, voice_path, timeline, proj_dir, proj_name, self.main_app.config, out_file, GLOBAL_OUT_DIR, EXCEL_LOG_FILE, self.add_log, broll_data)
+            # 5. Render Video (BẮT LẤY danh sách Broll thực tế đã bị nhét vào lò)
+            actual_used_brolls = render_faceless_video(
+                voice_name, voice_path, timeline, proj_dir, proj_name, 
+                self.main_app.config, out_file, GLOBAL_OUT_DIR, EXCEL_LOG_FILE, self.add_log, broll_data
+            )
 
             self.completed_count += 1
             self.add_log(f"✅ THÀNH CÔNG: Đã lưu {voice_name}!")
             
             # =======================================================
-            # [Ổ KHÓA SỐ 3] - BẢO VỆ TUYỆT ĐỐI SỐ LẦN DÙNG VOICE
+            # [Ổ KHÓA SỐ 3] - BẢO VỆ TUYỆT ĐỐI SỐ LẦN DÙNG CỦA CẢ VOICE VÀ BROLL
             # =======================================================
             try:
                 with json_save_lock:
                     fresh_p_data = self.main_app.get_project_data(pid) 
                     
+                    # 1. CỘNG ĐIỂM VOICE
                     if "voice_usage" not in fresh_p_data: 
                         fresh_p_data["voice_usage"] = {}
-                        
                     fresh_p_data["voice_usage"][voice_name] = fresh_p_data["voice_usage"].get(voice_name, 0) + 1
+                    
+                    # 2. CỘNG ĐIỂM BROLL (Dựa trên danh sách actual_used_brolls FFmpeg báo về)
+                    if actual_used_brolls and 'videos' in fresh_p_data:
+                        for v_name in actual_used_brolls:
+                            if v_name in fresh_p_data['videos']:
+                                current_usage = fresh_p_data['videos'][v_name].get('usage_count', 0)
+                                fresh_p_data['videos'][v_name]['usage_count'] = current_usage + 1
+                    
                     self.main_app.save_project_data(pid, fresh_p_data)
                     
                 self.main_app.root.after(0, self.main_app.tab1.load_voices)
+                # Cập nhật thêm giao diện list Broll để thấy số nhảy lên
+                if self.main_app.tab1.current_project_id == pid:
+                    self.main_app.root.after(0, lambda: self.main_app.tab1.render_video_list())
             except Exception as e:
-                self.add_log(f"⚠️ Lỗi cập nhật số lần dùng Voice: {e}")
+                self.add_log(f"⚠️ Lỗi cập nhật số lần dùng: {e}")
 
         except Exception as e:
             self.add_log(f"❌ LỖI {voice_name}: {e}")

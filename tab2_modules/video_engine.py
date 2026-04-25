@@ -600,3 +600,6 @@ def render_faceless_video(voice_name, voice_path, timeline, proj_dir, proj_name,
         log_cb(f"[{voice_name}] ⏭️ Shopee đang để Hết hàng, bỏ qua ghi file job đăng.")
     elif exported_to_shopee:
         log_cb(f"[{voice_name}] ✅ Đã ghi dữ liệu Shopee vào: {shopee_export_path}")
+        
+    # [BẢN ĐỘ MỚI] Trả về danh sách CHÍNH XÁC những video Broll đã bị FFmpeg nhét vào lò
+    return global_used_vids
