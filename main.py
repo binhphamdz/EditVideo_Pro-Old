@@ -71,6 +71,7 @@ from tab8_telegram import TelegramTab # <--- IMPORT TAB 8 MỚI
 from bot_telegram import TelegramBotManager
 from tab9_script_analysis import ScriptAnalysisTab
 from tab10_config import ConfigTab
+from tab12_voice import TabVoice
 
 # [ĐÃ SỬA] DÙNG BASE_PATH ĐỂ TẠO THƯ MỤC CẠNH FILE EXE CHỨ KHÔNG PHẢI TRONG TEMP
 WORKSPACE_DIR = ""
@@ -698,6 +699,11 @@ class MainApp:
         self.tab8_frame = tk.Frame(self.notebook, bg="#f4f6f9")
         self.notebook.add(self.tab8_frame, text=" 🤖CẤU HÌNH BOT TELEGRAM ")
         self.tab8 = TelegramTab(self.tab8_frame, self)
+
+        self.tab12_frame = tk.Frame(self.notebook, bg="#f4f6f9")
+        self.notebook.add(self.tab12_frame, text=" 🎙️ LÀM VOICE AI ")
+        self.tab12 = TabVoice(self.tab12_frame, self)
+
 
         # [THÊM TAB 10 VÀO ĐÂY]
         self.tab10_frame = tk.Frame(self.notebook, bg="#f4f6f9")

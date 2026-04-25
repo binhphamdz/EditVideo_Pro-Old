@@ -348,7 +348,6 @@ class FacelessTab:
         self.txt_log.see(tk.END)
         self.txt_log.config(state="disabled")
 
-    # ================= BOT VÀ RENDER =================
     def auto_render_from_bot(self, bot, chat_id):
         proj_name = self.combo_proj.get()
         if not proj_name: return bot.send_message(chat_id, "❌ Bác chưa chọn Project trên Tool!")
@@ -358,12 +357,22 @@ class FacelessTab:
         all_voices = [f for f in os.listdir(voice_dir) if f.lower().endswith(('.mp3', '.wav'))] if os.path.exists(voice_dir) else []
         if not all_voices: return bot.send_message(chat_id, "❌ Kho Voice trống!")
 
+        # --- [BẢN ĐỘ MỚI] ƯU TIÊN VOICE CHƯA DÙNG / DÙNG ÍT ---
         import random
+        project_data = self.main_app.get_project_data(pid)
+        voice_usage = project_data.get("voice_usage", {})
+        
+        # Xáo trộn trước để các voice có cùng số lần dùng không ra theo thứ tự chữ cái (ABC)
         random.shuffle(all_voices)
+        # Sắp xếp lại dựa trên số lần đã dùng (Ít nhất lên đầu)
+        all_voices.sort(key=lambda v: voice_usage.get(v, 0))
+        
+        # (Tùy chọn) Nếu sếp muốn Bot mỗi lần gọi chỉ làm 5 video thì bỏ comment dòng dưới:
+        # all_voices = all_voices[:5]
 
         self.main_app.config["app_base_path"] = BASE_PATH 
 
-        bot.send_message(chat_id, f"🎬 ĐẠO DIỄN AI NHẬN LỆNH!\n📁 Project: {proj_name}\n🎙️ {len(all_voices)} video. Đang xào nấu...")
+        bot.send_message(chat_id, f"🎬 ĐẠO DIỄN AI NHẬN LỆNH!\n📁 Project: {proj_name}\n🎙️ {len(all_voices)} video (Đã ưu tiên Voice mới). Đang xào nấu...")
         threading.Thread(target=self._run_multithread_batch, args=(all_voices, proj_dir, proj_name, bot, chat_id), daemon=True).start()
 
     def start_batch_process(self):

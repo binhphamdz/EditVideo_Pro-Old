@@ -64,7 +64,14 @@ def _fit_cover_layout(draw, layout_text, img_w, img_h, custom_font):
     max_text_width = img_w * 0.88
     max_text_height = img_h * 0.42
     low = 24
-    high = max(low, int(img_h * 0.16))
+    
+    # [BẢN ĐỘ MỚI] - KHÓA CỨNG KÍCH THƯỚC CHỮ TỐI ĐA (GOLDEN SIZE)
+    # Thay vì cho nó phóng to đến int(img_h * 0.16) (rất khổng lồ), 
+    # Ta chốt nó ở mức int(img_w * 0.13) (khoảng 140px cho video 1080p).
+    # Chữ ngắn sẽ dừng ở mức này, chữ dài sẽ tự động scale nhỏ lại một chút.
+    golden_max_size = int(img_w * 0.13) 
+    high = max(low, golden_max_size)
+    
     best_fit = None
 
     while low <= high:
@@ -72,13 +79,10 @@ def _fit_cover_layout(draw, layout_text, img_w, img_h, custom_font):
         font = _load_cover_font(custom_font, font_size)
         stroke_w = max(2, int(font_size * 0.11))
         line_spacing = max(6, int(font_size * 0.08))
+        
         bbox = draw.multiline_textbbox(
-            (0, 0),
-            layout_text,
-            font=font,
-            align="center",
-            spacing=line_spacing,
-            stroke_width=stroke_w,
+            (0, 0), layout_text, font=font, align="center",
+            spacing=line_spacing, stroke_width=stroke_w,
         )
         text_width = bbox[2] - bbox[0]
         text_height = bbox[3] - bbox[1]
@@ -238,7 +242,14 @@ def render_faceless_video(voice_name, voice_path, timeline, proj_dir, proj_name,
                     global_used_vids.clear()
                     available = all_brolls
                 if len(available) > 1 and last_vid_name in available: available.remove(last_vid_name)
-                v_n = random.choice(available)
+                
+                # --- [BẢN ĐỘ MỚI] ÉP FFMPEG LẤY VIDEO ÍT DÙNG NHẤT ---
+                # Sắp xếp available dựa trên usage_count từ thấp đến cao
+                available.sort(key=lambda v: broll_data.get(v, {}).get('usage_count', 0))
+                
+                # Bốc ngẫu nhiên 1 trong 3 video ít dùng nhất để đổi vị, không bị 1 màu
+                top_candidates = available[:3] 
+                v_n = random.choice(top_candidates)
             
             v_path = os.path.join(proj_dir, "Broll", v_n)
             dur, has_audio = get_vid_info(v_path)
@@ -496,19 +507,17 @@ def render_faceless_video(voice_name, voice_path, timeline, proj_dir, proj_name,
     temp_frame_jpg = os.path.join(out_dir, f"temp_frame_{temp_token}.jpg")
     temp_cover_png = os.path.join(out_dir, f"temp_cover_{temp_token}.png")
 
-    log_cb(f"[{voice_name}] Đang bốc ngẫu nhiên 1 frame làm ảnh bìa...")
+    log_cb(f"[{voice_name}] Đang bốc ngẫu nhiên 1 frame toàn dải làm ảnh bìa...")
+    
+    # [BẢN ĐỘ MỚI] - BỐC RANDOM THẬT SỰ
     extract_points = []
-    if voice_dur > 0:
-        safe_max_time = max(0.0, voice_dur - 0.3)
-        if safe_max_time <= 0.0:
-            extract_points = [0.0]
-        else:
-            extract_points = sorted({
-                round(min(max(0.0, random.uniform(0.0, safe_max_time)), safe_max_time), 2),
-                round(min(0.1, safe_max_time), 2),
-                round(min(max(0.0, voice_dur * 0.25), safe_max_time), 2),
-                round(min(max(0.0, voice_dur * 0.5), safe_max_time), 2),
-            })
+    if voice_dur > 2.0:
+        # Lấy random 1 thời điểm từ giây thứ 1 đến sát cuối video (tránh frame đen đầu/cuối)
+        random_sec = round(random.uniform(1.0, voice_dur - 1.0), 2)
+        
+        # Đưa thẳng điểm random lên đầu để FFmpeg trích xuất trước. 
+        # Nếu điểm random bị hỏng (hiếm khi), nó mới lấy điểm giữa hoặc điểm đầu làm backup.
+        extract_points = [random_sec, round(voice_dur / 2, 2), 0.5] 
     else:
         extract_points = [0.0]
 
@@ -516,7 +525,7 @@ def render_faceless_video(voice_name, voice_path, timeline, proj_dir, proj_name,
     frame_error = ""
     for point in extract_points:
         frame_result = subprocess.run(
-            ['ffmpeg', '-y', '-ss', f"{point:.2f}", '-i', temp_main_mp4, '-frames:v', '1', temp_frame_jpg],
+        ['ffmpeg', '-y', '-ss', f"{point:.2f}", '-i', temp_main_mp4, '-frames:v', '1', temp_frame_jpg],
             capture_output=True,
             text=True,
             encoding='utf-8',
