@@ -305,7 +305,6 @@ class FacelessTab:
 
     def auto_render_from_bot(self, bot, chat_id):
         import os
-        import random
         import threading
         from paths import BASE_PATH
         import database
@@ -323,62 +322,66 @@ class FacelessTab:
         
         if not os.path.exists(voice_dir):
             return bot.send_message(chat_id, "❌ Thư mục Voices chưa được tạo!")
-            
-        all_voices = [f for f in os.listdir(voice_dir) if f.lower().endswith(('.mp3', '.wav', '.m4a'))]
-        if not all_voices: 
-            return bot.send_message(chat_id, "❌ Kho Voice trống trơn! Sếp nạp thêm đạn vào đi.")
 
-        # --- [COOLDOWN] Bốc Voice thông minh: ưu tiên voice chưa dùng trong 3 ngày ---
-        with database.db_lock:
+        # --- [BẢN ĐỘ MỚI - FIX LỖI TRÙNG NGÀY ĐA LUỒNG] ---
+        db_proj_id = database.get_or_create_project(proj_name)
+        
+        # BỌC KHÓA LUỒNG TẠI ĐÂY: Đảm bảo chỉ 1 người được vào lấy và cập nhật Voice 1 lúc
+        with database.db_lock: 
             conn = database.get_connection()
             cursor = conn.cursor()
-            cursor.execute("SELECT id FROM projects WHERE name = ?", (proj_name,))
-            row = cursor.fetchone()
-            if not row:
-                conn.close()
-                return bot.send_message(chat_id, "❌ Không tìm thấy Project trong Database!")
-            db_proj_id = row['id']
-
-            # Lấy voice đã nạp vào DB, loại trừ những voice dùng trong 3 ngày gần nhất
-            cursor.execute('''
-                SELECT file_name FROM voices
-                WHERE project_id = ?
-                  AND (last_used IS NULL OR last_used < datetime('now', '-3 days', 'localtime'))
+            
+            # 1. Quét tìm những Voice đã nghỉ ngơi trên 3 ngày (Hoặc chưa dùng bao giờ)
+            query = '''
+                SELECT file_name FROM voices 
+                WHERE project_id = ? 
+                AND (last_used IS NULL OR last_used <= datetime('now', '-3 days', 'localtime'))
                 ORDER BY usage_count ASC, last_used ASC
-            ''', (db_proj_id,))
-            cooldown_rows = cursor.fetchall()
-
-            # FALLBACK: Nếu toàn bộ voice đang trong cooldown → bốc cái lâu nhất chưa dùng
-            if not cooldown_rows:
+            '''
+            cursor.execute(query, (db_proj_id,))
+            rows = cursor.fetchall()
+            
+            # 2. FALLBACK 1: Nếu cạn kiệt, hạ tiêu chuẩn xuống 1 NGÀY (Tuyệt đối né hôm nay)
+            if not rows:
                 cursor.execute('''
-                    SELECT file_name FROM voices
-                    WHERE project_id = ?
+                    SELECT file_name FROM voices 
+                    WHERE project_id = ? 
+                    AND (last_used IS NULL OR last_used <= datetime('now', '-1 days', 'localtime'))
                     ORDER BY last_used ASC
                 ''', (db_proj_id,))
-                cooldown_rows = cursor.fetchall()
+                rows = cursor.fetchall()
 
+            # 3. FALLBACK 2: Nếu vẫn không có, tức là TẤT CẢ voice đều đã bị dùng trong 24h qua!
+            if not rows:
+                conn.close()
+                return bot.send_message(chat_id, "❌ KHO VOICE ĐÃ BỊ VẮT KIỆT!\nToàn bộ Voice của sếp đều đã được dùng trong 24h qua. Để tránh trùng lặp video, sếp vui lòng nạp thêm file mp3 mới vào nhé!")
+
+            # 4. Chốt danh sách (Tối đa 3 voice)
+            all_voices = [r['file_name'] for r in rows][:3]
+
+            # 5. [QUAN TRỌNG NHẤT] KHÓA (GIỮ CHỖ) NGAY LẬP TỨC TRONG CÙNG 1 TRANSACTION!
+            for v in all_voices:
+                cursor.execute('''
+                    UPDATE voices 
+                    SET last_used = datetime('now', 'localtime') 
+                    WHERE project_id = ? AND file_name = ?
+                ''', (db_proj_id, v))
+            conn.commit()
             conn.close()
 
-        # Chỉ lấy những file thực sự tồn tại trên ổ cứng
-        db_voice_names = [r['file_name'] for r in cooldown_rows]
-        all_voices = [v for v in db_voice_names if os.path.exists(os.path.join(voice_dir, v))]
-
-        # Nếu DB chưa có voice nào (project mới chưa migrate) → fallback lấy file trực tiếp
-        if not all_voices:
-            all_voices = [f for f in os.listdir(voice_dir) if f.lower().endswith(('.mp3', '.wav', '.m4a'))]
-            all_voices = all_voices[:3]
-        else:
-            all_voices = all_voices[:3]
-
-        if not all_voices:
-            return bot.send_message(chat_id, "❌ Kho Voice trống trơn! Sếp nạp thêm đạn vào đi.")
-
-        self.main_app.config["app_base_path"] = BASE_PATH
-        bot.send_message(chat_id, f"🎬 ĐẠO DIỄN AI NHẬN LỆNH!\n📁 Project: {proj_name}\n🎙️ Đã lọc ra {len(all_voices)} voice (tránh trùng 3 ngày). Đang đưa vào lò xào nấu...")
-        threading.Thread(target=self._run_multithread_batch, args=(all_voices, proj_dir, proj_name, bot, chat_id), daemon=True).start()
+        self.main_app.config["app_base_path"] = BASE_PATH 
+        bot.send_message(chat_id, f"🎬 ĐẠO DIỄN AI NHẬN LỆNH!\n📁 Project: {proj_name}\n🎙️ Đã chốt {len(all_voices)} voice sạch (Không trùng lặp). Đang đưa vào lò...")
+        
+        # Đẩy vào luồng render
+        threading.Thread(
+            target=self._run_multithread_batch, 
+            args=(all_voices, proj_dir, proj_name, bot, chat_id), 
+            daemon=True
+        ).start()
 
     def start_batch_process(self):
         import database
+        import threading
         proj_name = self.combo_proj.get()
         selected_indices = self.lst_voices.curselection()
         
@@ -400,11 +403,11 @@ class FacelessTab:
 
         voices = [self.lst_voices.get(i) for i in selected_indices]
         
-        # --- [BẢN ĐỘ MỚI] Lấy sổ nợ từ Database ---
+        # --- [BẢN ĐỘ MỚI] Bốc voice theo luồng ---
         import random
         random.shuffle(voices)
         
-        with database.db_lock:
+        with database.db_lock:  # BỌC KHÓA LUỒNG TẠI ĐÂY
             conn = database.get_connection()
             cursor = conn.cursor()
             cursor.execute("SELECT id FROM projects WHERE name = ?", (proj_name,))

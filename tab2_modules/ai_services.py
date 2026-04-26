@@ -326,7 +326,12 @@ VÒNG 1 - TÌM KIẾM ỨNG VIÊN:
 4. BẮT BUỘC trả về ĐÚNG CÚ PHÁP JSON (có dấu ngoặc kép ở các key):
 [ {{"start": 0.0, "end": 2.5, "text": "...", "candidates": ["vid1.mp4", "vid2.mp4"]}} ]"""
             
-    payload_1 = {"model": "gemini-3-flash", "messages": [{"role": "user", "content": prompt_1}], "temperature": 0.5}
+    payload_1 = {
+        "model": "gemini-3-flash", 
+        "messages": [{"role": "user", "content": prompt_1}], 
+        "temperature": 0.5,
+        "response_format": { "type": "json_object" }  # <-- [ÉP CẤP 2] Bắt buộc nhả JSON
+    }
     
     raw_timeline = []
     for attempt in range(3): # Vòng lặp tái sinh
@@ -368,7 +373,12 @@ VÒNG 2 - CHỐT HẠ CHUỖI VIDEO:
 4. BẮT BUỘC trả về ĐÚNG CÚ PHÁP JSON (có dấu ngoặc kép ở các key):
 [ {{"start": 0.0, "end": 4.5, "text": "...", "video_files": ["vid_1.mp4", "vid_2.mp4"]}} ]"""
 
-    payload_2 = {"model": "gemini-3-flash", "messages": [{"role": "user", "content": prompt_2}], "temperature": 0.2}
+    payload_2 = {
+        "model": "gemini-3-flash", 
+        "messages": [{"role": "user", "content": prompt_2}], 
+        "temperature": 0.2,
+        "response_format": { "type": "json_object" }  # <-- [ÉP CẤP 2] Bắt buộc nhả JSON
+    }
     
     final_timeline = []
     for attempt in range(3): # Vòng lặp tái sinh
@@ -559,7 +569,12 @@ NỘI DUNG CẦN XỬ LÝ:
     
     prompt_0 = build_tail_prompt(raw_voice_text)
 
-    payload_0 = {"model": "gemini-3-flash", "messages": [{"role": "user", "content": prompt_0}], "temperature": 0.2}
+    payload_0 = {
+        "model": "gemini-3-flash", 
+        "messages": [{"role": "user", "content": prompt_0}], 
+        "temperature": 0.2,
+        "response_format": { "type": "json_object" }  # <-- [ÉP CẤP 2] Bắt buộc nhả JSON
+    }
     url_kie = "https://api.kie.ai/gemini-3-flash/v1/chat/completions"
     headers = {"Authorization": f"Bearer {config.get('kie_key')}", "Content-Type": "application/json"}
 
