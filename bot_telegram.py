@@ -91,56 +91,47 @@ class TelegramBotManager:
         self.start_telegram_bot()
 
     def get_bot_stats(self):
-        import os, csv
+        import database
         from datetime import datetime
-        from main import EXCEL_LOG_FILE
-        
+
         total = today = da_chuyen = chua_chuyen = 0
-        today_str = datetime.now().strftime('%d/%m/%Y')
-        excel_file = EXCEL_LOG_FILE 
-        
+        today_str = datetime.now().strftime('%Y-%m-%d')
         raw_lines = []
-        
-        if os.path.exists(excel_file):
-            try:
-                with open(excel_file, 'r', encoding='utf-8-sig') as f:
-                    reader = csv.reader(f)
-                    next(reader, None) 
-                    for row in reader:
-                        if not row or len(row) < 4: continue
-                        
-                        total += 1
-                        if row[0].startswith(today_str): 
-                            today += 1
-                            
-                        status = row[4].strip() if len(row) > 4 else "Chưa chuyển"
-                        if "Đã" in status:
-                            da_chuyen += 1
-                        else:
-                            chua_chuyen += 1
-                            
-                        raw_lines.append(",".join(row))
-            except Exception as e: 
-                print("Lỗi đọc Excel của Bot:", e)
+
+        try:
+            rows = database.get_all_rendered_videos()
+            for row in rows:
+                total += 1
+                created = str(row['created_at'])[:10]  # "YYYY-MM-DD"
+                if created == today_str:
+                    today += 1
+                status = (row['status'] or "Chưa chuyển").strip()
+                if "Đã" in status:
+                    da_chuyen += 1
+                else:
+                    chua_chuyen += 1
+                raw_lines.append(f"{row['created_at']},{row['project_name']},{row['voice_name']},{row['file_path']},{status}")
+        except Exception as e:
+            print("Lỗi đọc stats từ DB:", e)
 
         return total, today, da_chuyen, chua_chuyen, raw_lines
-    
 
     def get_voice_usage(self):
-        """Đọc sổ Excel để lấy chính xác số lần từng Voice đã bị đem ra sử dụng"""
-        from main import EXCEL_LOG_FILE
-        import os, csv
+        """Lấy số lần sử dụng từng Voice từ Database"""
+        import database
         usage = {}
-        if os.path.exists(EXCEL_LOG_FILE):
-            try:
-                with open(EXCEL_LOG_FILE, 'r', encoding='utf-8-sig') as f:
-                    reader = csv.reader(f)
-                    next(reader, None) 
-                    for row in reader:
-                        if len(row) >= 3:
-                            key = f"{row[1].strip()}_{row[2].strip()}"
-                            usage[key] = usage.get(key, 0) + 1
-            except: pass
+        try:
+            conn = database.get_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT p.name as project_name, v.file_name, v.usage_count
+                FROM voices v JOIN projects p ON v.project_id = p.id
+            """)
+            for row in cursor.fetchall():
+                key = f"{row['project_name']}_{row['file_name']}"
+                usage[key] = row['usage_count']
+            conn.close()
+        except: pass
         return usage
 
     def pick_least_used_voices(self, project_name, voices, voice_usage_db, count):

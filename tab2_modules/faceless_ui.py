@@ -329,14 +329,15 @@ class FacelessTab:
             return bot.send_message(chat_id, "❌ Kho Voice trống trơn! Sếp nạp thêm đạn vào đi.")
 
         # --- [BẢN ĐỘ MỚI] Lấy sổ nợ từ Database ---
-        conn = database.get_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT id FROM projects WHERE name = ?", (proj_name,))
-        db_proj_id = cursor.fetchone()['id']
-        
-        cursor.execute("SELECT file_name, usage_count FROM voices WHERE project_id = ?", (db_proj_id,))
-        voice_usage = {r['file_name']: r['usage_count'] for r in cursor.fetchall()}
-        conn.close()
+        with database.db_lock:
+            conn = database.get_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT id FROM projects WHERE name = ?", (proj_name,))
+            db_proj_id = cursor.fetchone()['id']
+            
+            cursor.execute("SELECT file_name, usage_count FROM voices WHERE project_id = ?", (db_proj_id,))
+            voice_usage = {r['file_name']: r['usage_count'] for r in cursor.fetchall()}
+            conn.close()
 
         random.shuffle(all_voices)
         
@@ -379,14 +380,15 @@ class FacelessTab:
         import random
         random.shuffle(voices)
         
-        conn = database.get_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT id FROM projects WHERE name = ?", (proj_name,))
-        db_proj_id = cursor.fetchone()['id']
-        
-        cursor.execute("SELECT file_name, usage_count FROM voices WHERE project_id = ?", (db_proj_id,))
-        voice_usage = {r['file_name']: r['usage_count'] for r in cursor.fetchall()}
-        conn.close()
+        with database.db_lock:
+            conn = database.get_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT id FROM projects WHERE name = ?", (proj_name,))
+            db_proj_id = cursor.fetchone()['id']
+            
+            cursor.execute("SELECT file_name, usage_count FROM voices WHERE project_id = ?", (db_proj_id,))
+            voice_usage = {r['file_name']: r['usage_count'] for r in cursor.fetchall()}
+            conn.close()
 
         def get_usage_for_gui(v_name):
             for k, v in voice_usage.items():
@@ -444,8 +446,11 @@ class FacelessTab:
             # =======================================================
             import database
             db_proj_id = database.get_or_create_project(proj_name)
-            conn = database.get_connection()
-            cursor = conn.cursor()
+            
+            # Bọc toàn bộ database operations vào lock để chống "database is locked"
+            with database.db_lock:
+                conn = database.get_connection()
+                cursor = conn.cursor()
             
             # =======================================================
             # 2. BÓC BĂNG (Lấy nội dung chữ từ file âm thanh)
@@ -461,8 +466,12 @@ class FacelessTab:
             # =======================================================
             # 3. LẤY KHO CẢNH TRÁM (BROLL) TỪ DATABASE
             # =======================================================
-            cursor.execute("SELECT file_name, duration, description, usage_count, keep_audio FROM brolls WHERE project_id = ? AND status = 'active'", (db_proj_id,))
-            broll_rows = cursor.fetchall()
+            with database.db_lock:
+                conn = database.get_connection()
+                cursor = conn.cursor()
+                cursor.execute("SELECT file_name, duration, description, usage_count, keep_audio FROM brolls WHERE project_id = ? AND status = 'active'", (db_proj_id,))
+                broll_rows = cursor.fetchall()
+                conn.close()
             
             broll_data = {}
             broll_text = ""
@@ -508,20 +517,32 @@ class FacelessTab:
 
             self.completed_count += 1
             self.add_log(f"✅ THÀNH CÔNG: Đã xuất xưởng {voice_name}!")
-            
+
             # =======================================================
-            # 6. CỘNG ĐIỂM SỬ DỤNG (UPDATE DATABASE SIÊU TỐC)
+            # 6. GHI NHẬT KÝ VIDEO THÀNH PHẨM VÀO DATABASE (Thay CSV cũ)
             # =======================================================
             try:
-                # Cộng 1 lượt dùng cho file Voice
-                cursor.execute("UPDATE voices SET usage_count = usage_count + 1 WHERE project_id = ? AND file_name = ?", (db_proj_id, voice_name))
-                
-                # Cộng 1 lượt dùng cho từng cảnh trám thực tế đã xuất hiện trong video
-                if actual_used_brolls:
-                    for v_name in actual_used_brolls:
-                        cursor.execute("UPDATE brolls SET usage_count = usage_count + 1 WHERE project_id = ? AND file_name = ?", (db_proj_id, v_name))
-                
-                conn.commit()
+                database.log_rendered_video(proj_name, voice_name, out_file)
+            except Exception as e:
+                self.add_log(f"⚠️ Không ghi được log video vào DB: {e}")
+
+            # =======================================================
+            # 7. CỘNG ĐIỂM SỬ DỤNG (UPDATE DATABASE SIÊU TỐC)
+            # =======================================================
+            try:
+                with database.db_lock:
+                    conn = database.get_connection()
+                    cursor = conn.cursor()
+                    # Cộng 1 lượt dùng cho file Voice
+                    cursor.execute("UPDATE voices SET usage_count = usage_count + 1 WHERE project_id = ? AND file_name = ?", (db_proj_id, voice_name))
+                    
+                    # Cộng 1 lượt dùng cho từng cảnh trám thực tế đã xuất hiện trong video
+                    if actual_used_brolls:
+                        for v_name in actual_used_brolls:
+                            cursor.execute("UPDATE brolls SET usage_count = usage_count + 1 WHERE project_id = ? AND file_name = ?", (db_proj_id, v_name))
+                    
+                    conn.commit()
+                    conn.close()
                 
                 # Cập nhật lại giao diện Tab 1 để sếp thấy điểm nhảy ngay lập tức
                 self.main_app.root.after(0, self.main_app.tab1.load_voices)
@@ -530,7 +551,10 @@ class FacelessTab:
             except Exception as e:
                 self.add_log(f"⚠️ Lỗi cập nhật Database số lần dùng: {e}")
             finally:
-                conn.close() # Quan trọng: Luôn đóng kết nối sau khi xong việc
+                try:
+                    conn.close()
+                except:
+                    pass
 
         except Exception as e:
             self.add_log(f"❌ LỖI NGHIÊM TRỌNG {voice_name}: {e}")

@@ -1,5 +1,4 @@
 import os
-import csv
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import shutil
@@ -149,40 +148,26 @@ class ManagerTab:
             self.context_menu.post(event.x_root, event.y_root)
 
     def load_excel_data(self):
-        """Đọc file Excel và nhồi vào bảng - BỎ QUÉT FILE RÁC & TỰ TẠO TIÊU ĐỀ"""
-        from main import EXCEL_LOG_FILE
-        import os, csv
-        
+        """Đọc danh sách video thành phẩm từ Database và nhồi vào bảng"""
+        import database
+
         # 1. Xóa sạch bảng UI để chuẩn bị load lại
-        for item in self.tree.get_children(): 
+        for item in self.tree.get_children():
             self.tree.delete(item)
-            
-        # 2. CHỐT CHẶN TIÊU ĐỀ: Nếu file chưa có hoặc bị xóa trắng, tự động tạo file và nạp Tên Cột vào
-        header = ["Ngày Tạo", "Tên Project", "File Voice", "Đường Dẫn", "Trạng Thái"]
-        excel_dir = os.path.dirname(EXCEL_LOG_FILE)
-        if excel_dir:
-            os.makedirs(excel_dir, exist_ok=True)
-        if not os.path.exists(EXCEL_LOG_FILE) or os.path.getsize(EXCEL_LOG_FILE) == 0:
-            with open(EXCEL_LOG_FILE, 'w', encoding='utf-8-sig', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow(header)
-                
-        # 3. Đọc dữ liệu từ sổ lên giao diện
+
+        # 2. Đọc dữ liệu từ Database
         try:
-            with open(EXCEL_LOG_FILE, 'r', encoding='utf-8-sig') as f:
-                reader = csv.reader(f)
-                next(reader, None) # Bỏ qua dòng tiêu đề lúc hiển thị lên UI
-                
-                rows = list(reader)
-                rows.reverse() # Lật ngược lại để video mới nhất nảy lên trên cùng
-                
-                for r in rows:
-                    if len(r) >= 4: # Có trong sổ Excel là hiện hết lên Tool
-                        status = r[4] if len(r) > 4 else "Chưa chuyển"
-                        tag = "done" if status == "Đã chuyển" else "pending"
-                        self.tree.insert("", "end", values=(r[0], r[1], r[2], r[3], status), tags=(tag,))
-        except Exception as e: 
-            print("Lỗi load bảng:", e)
+            rows = database.get_all_rendered_videos()
+            for r in rows:
+                created_at = str(r['created_at'])[:16]  # Cắt bỏ giây
+                project_name = r['project_name']
+                voice_name = r['voice_name']
+                file_path = r['file_path']
+                status = r['status'] or "Chưa chuyển"
+                tag = "done" if status == "Đã chuyển" else "pending"
+                self.tree.insert("", "end", values=(created_at, project_name, voice_name, file_path, status), tags=(tag,))
+        except Exception as e:
+            print("Lỗi load bảng từ DB:", e)
             
     def open_video(self):
         selected = self.tree.selection()
@@ -262,6 +247,7 @@ class ManagerTab:
 
     def _copy_selected_files_shuffled(self, selected_items, target_dir, mark_as=None):
         import random
+        import database
 
         success_count = 0
         file_timestamp = datetime.now().strftime("%Y%m%d_%H%M")
@@ -281,7 +267,7 @@ class ManagerTab:
                 try:
                     shutil.copy2(path, target_path)
                     if mark_as:
-                        self.update_excel_status(path, mark_as)
+                        database.update_rendered_video_status(path, mark_as)
                     success_count += 1
                 except Exception as e:
                     print(f"Lỗi khi copy {original_name}: {e}")
@@ -290,141 +276,82 @@ class ManagerTab:
         return success_count
 
     def auto_sync_icloud(self, bot=None, chat_id=None):
-        from main import EXCEL_LOG_FILE
-        if not os.path.exists(EXCEL_LOG_FILE): return
-        
+        import database
+
         icloud_dir = self.main_app.config.get("icloud_path", "")
         if not icloud_dir or not os.path.exists(icloud_dir):
             if bot and chat_id:
                 bot.send_message(chat_id, "❌ Lỗi: PC chưa cài đặt thư mục iCloud! Bác hãy mở Tool trên máy tính, chuyển thử 1 video để cài đặt thư mục trước nhé.")
             return
 
-        pending_files = []
-        try:
-            with open(EXCEL_LOG_FILE, 'r', encoding='utf-8-sig') as f:
-                reader = csv.reader(f)
-                next(reader, None)
-                for r in reader:
-                    if len(r) >= 4 and os.path.exists(r[3]):
-                        status = r[4] if len(r) > 4 else "Chưa chuyển"
-                        if status != "Đã chuyển":
-                            pending_files.append(r[3])
-        except: pass
+        pending_files = [p for p in database.get_pending_rendered_videos() if os.path.exists(p)]
 
         if not pending_files:
             if bot and chat_id:
                 bot.send_message(chat_id, "🤷‍♂️ Kho không có video nào mới (Tất cả đã được chuyển rồi)!")
             return
 
-        folder_timestamp = datetime.now().strftime("%d%m%Y_%H%M") 
+        folder_timestamp = datetime.now().strftime("%d%m%Y_%H%M")
         folder_name = f"Auto_iCloud_{folder_timestamp}"
         target_dir = os.path.join(icloud_dir, folder_name)
         os.makedirs(target_dir, exist_ok=True)
-        
-        success_count = 0
-        file_timestamp = datetime.now().strftime("%Y%m%d_%H%M") 
 
-        # ========================================================
-        # [MỚI] ÉP IPHONE XẾP XEN KẼ VIDEO TỪ BOT
-        # ========================================================
+        success_count = 0
+        file_timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+
         import random
         random.shuffle(pending_files)
 
         for idx, path in enumerate(pending_files, 1):
             original_name = os.path.basename(path)
-            # Gắn đầu số 01, 02... vào file
             new_name = f"{idx:02d}_[{file_timestamp}]_{original_name}"
             target_path = os.path.join(target_dir, new_name)
             try:
                 shutil.copy2(path, target_path)
-                self.update_excel_status(path, "Đã chuyển")
+                database.update_rendered_video_status(path, "Đã chuyển")
                 success_count += 1
             except:
                 continue
-        
+
         try: self.main_app.root.after(0, self.load_excel_data)
         except: pass
-        
+
         if bot and chat_id:
             bot.send_message(
-                chat_id, 
+                chat_id,
                 f"☁️ Đã đồng bộ và XÁO TRỘN thành công {success_count} video mới sang iCloud!\n"
                 f"📂 Tên thư mục: {folder_name}\n"
                 f"📱 Bác mở app Tệp (Files) trên iPhone đợi xíu là có hàng, chọn video từ trên xuống dưới là tự xen kẽ nhé!"
             )
-            
 
     def update_excel_path(self, old_path, new_path):
-        from main import EXCEL_LOG_FILE
-        header = ["Ngày Tạo", "Tên Project", "File Voice", "Đường Dẫn", "Trạng Thái"]
-        rows = []
-        if os.path.exists(EXCEL_LOG_FILE):
-            with open(EXCEL_LOG_FILE, 'r', encoding='utf-8-sig') as f:
-                reader = csv.reader(f)
-                next(reader, None)
-                for r in reader:
-                    if len(r) >= 4 and r[3] == old_path:
-                        r[3] = new_path
-                    rows.append(r)
-            with open(EXCEL_LOG_FILE, 'w', encoding='utf-8-sig', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow(header)
-                writer.writerows(rows)
+        import database
+        database.update_rendered_video_path(old_path, new_path)
 
     def update_excel_status(self, file_path, new_status):
-        from main import EXCEL_LOG_FILE
-        header = ["Ngày Tạo", "Tên Project", "File Voice", "Đường Dẫn", "Trạng Thái"]
-        rows = []
-        
-        if os.path.exists(EXCEL_LOG_FILE):
-            with open(EXCEL_LOG_FILE, 'r', encoding='utf-8-sig') as f:
-                reader = csv.reader(f)
-                next(reader, None) # Bỏ qua header cũ
-                
-                for r in reader:
-                    if len(r) >= 4 and r[3] == file_path:
-                        if len(r) == 4: r.append(new_status)
-                        else: r[4] = new_status
-                    rows.append(r)
-            
-            with open(EXCEL_LOG_FILE, 'w', encoding='utf-8-sig', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow(header) # Luôn ghi header mới lên đầu
-                writer.writerows(rows)
+        import database
+        database.update_rendered_video_status(file_path, new_status)
 
     def delete_video(self):
         selected = self.tree.selection()
-        if not selected: 
+        if not selected:
             return
-        
-        if not messagebox.askyesno("Xác nhận mạnh", "Bác có chắc muốn phi tang TẤT CẢ các video đang bôi đen không?"): 
+
+        if not messagebox.askyesno("Xác nhận mạnh", "Bác có chắc muốn phi tang TẤT CẢ các video đang bôi đen không?"):
             return
-        
-        from main import EXCEL_LOG_FILE
+
+        import database
         deleted_paths = [self.tree.item(i)['values'][3] for i in selected]
         deleted_video_names = [os.path.basename(path) for path in deleted_paths]
-        
+
         for path in deleted_paths:
             try:
-                if os.path.exists(path): 
+                if os.path.exists(path):
                     os.remove(path)
-            except Exception as e: 
+            except Exception as e:
                 print(f"Không xóa được {path}: {e}")
-            
-        header = ["Ngày Tạo", "Tên Project", "File Voice", "Đường Dẫn", "Trạng Thái"]
-        rows = []
-        if os.path.exists(EXCEL_LOG_FILE):
-            with open(EXCEL_LOG_FILE, 'r', encoding='utf-8-sig') as f:
-                reader = csv.reader(f)
-                next(reader, None)
-                for r in reader:
-                    if len(r) >= 4 and r[3] not in deleted_paths: 
-                        rows.append(r)
-            
-            with open(EXCEL_LOG_FILE, 'w', encoding='utf-8-sig', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow(header)
-                writer.writerows(rows)
+
+        database.delete_rendered_videos(deleted_paths)
 
         try:
             delete_shopee_jobs(deleted_video_names, config=self.main_app.config)
@@ -432,7 +359,7 @@ class ManagerTab:
                 self.main_app.root.after(0, self.main_app.tab11.refresh_jobs_preview)
         except Exception as e:
             print(f"Không xóa được job Shopee tương ứng: {e}")
-                
+
         self.load_excel_data()
 
     def open_folder(self):
@@ -441,9 +368,10 @@ class ManagerTab:
             os.startfile(GLOBAL_OUT_DIR)
 
     def open_excel(self):
-        from main import EXCEL_LOG_FILE
-        if os.path.exists(EXCEL_LOG_FILE): 
-            os.startfile(EXCEL_LOG_FILE)
+        """Mở thư mục kho chứa video thành phẩm (CSV cũ đã thay bằng Database)"""
+        from main import GLOBAL_OUT_DIR
+        if os.path.exists(GLOBAL_OUT_DIR):
+            os.startfile(GLOBAL_OUT_DIR)
 
     # ================= WEB SERVER LAN =================
 
@@ -465,7 +393,6 @@ class ManagerTab:
         import urllib.parse
         import html
         import os
-        import csv
         import random 
         import zipfile 
         
@@ -486,7 +413,7 @@ class ManagerTab:
             self.httpd = None
             self.main_app.root.after(0, lambda: update_ui_and_notify(False, "🔌 Đã TẮT Trạm phát sóng Web Server!"))
         else:
-            from main import GLOBAL_OUT_DIR, EXCEL_LOG_FILE
+            from main import GLOBAL_OUT_DIR
             abs_dir = os.path.abspath(GLOBAL_OUT_DIR)
             os.makedirs(abs_dir, exist_ok=True)
             
@@ -551,17 +478,10 @@ class ManagerTab:
                             try:
                                 if os.path.exists(file_path): os.remove(file_path)
                             except: pass
-                            if os.path.exists(EXCEL_LOG_FILE):
-                                try:
-                                    with open(EXCEL_LOG_FILE, 'r', encoding='utf-8-sig') as f:
-                                        reader = csv.reader(f)
-                                        header = next(reader, None)
-                                        rows = [r for r in reader if len(r) >= 4 and r[3] != file_path]
-                                    with open(EXCEL_LOG_FILE, 'w', encoding='utf-8-sig', newline='') as f:
-                                        writer = csv.writer(f)
-                                        if header: writer.writerow(header)
-                                        writer.writerows(rows)
-                                except: pass
+                            try:
+                                import database
+                                database.delete_rendered_videos([file_path])
+                            except: pass
                             try: tab_instance.main_app.root.after(0, tab_instance.load_excel_data)
                             except: pass
                         self.send_response(200)
@@ -580,14 +500,11 @@ class ManagerTab:
                         random.shuffle(mp4_files)
 
                         status_map = {}
-                        if os.path.exists(EXCEL_LOG_FILE):
-                            try:
-                                with open(EXCEL_LOG_FILE, 'r', encoding='utf-8-sig') as f:
-                                    reader = csv.reader(f)
-                                    next(reader, None)
-                                    for r in reader:
-                                        if len(r) >= 5: status_map[os.path.basename(r[3])] = r[4]
-                            except: pass
+                        try:
+                            import database
+                            for r in database.get_all_rendered_videos():
+                                status_map[os.path.basename(r['file_path'])] = r['status']
+                        except: pass
 
                         html_code = f"""
                         <!DOCTYPE html>

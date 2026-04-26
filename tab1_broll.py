@@ -394,30 +394,31 @@ class BRollTab:
             
             # --- [BẢN ĐỘ MỚI] KẾT NỐI DATABASE ---
             import database
-            conn = database.get_connection()
-            cursor = conn.cursor()
-            proj_name = self.main_app.projects[self.current_project_id]['name']
-            cursor.execute("SELECT id FROM projects WHERE name = ?", (proj_name,))
-            db_proj_id = cursor.fetchone()['id']
-            
-            for vid_name in selected_vids:
-                # Xóa file Video
-                vid_path = os.path.join(target_dir, vid_name)
-                if os.path.exists(vid_path):
-                    try: os.remove(vid_path)
-                    except: pass
+            with database.db_lock:
+                conn = database.get_connection()
+                cursor = conn.cursor()
+                proj_name = self.main_app.projects[self.current_project_id]['name']
+                cursor.execute("SELECT id FROM projects WHERE name = ?", (proj_name,))
+                db_proj_id = cursor.fetchone()['id']
                 
-                # Xóa file Thumbnail
-                thumb_path = os.path.join(target_dir, ".thumbnails", f"{vid_name}.jpg")
-                if os.path.exists(thumb_path):
-                    try: os.remove(thumb_path)
-                    except: pass
+                for vid_name in selected_vids:
+                    # Xóa file Video
+                    vid_path = os.path.join(target_dir, vid_name)
+                    if os.path.exists(vid_path):
+                        try: os.remove(vid_path)
+                        except: pass
+                    
+                    # Xóa file Thumbnail
+                    thumb_path = os.path.join(target_dir, ".thumbnails", f"{vid_name}.jpg")
+                    if os.path.exists(thumb_path):
+                        try: os.remove(thumb_path)
+                        except: pass
+                    
+                    # Bắn lệnh SQL xóa vĩnh viễn khỏi Database
+                    cursor.execute("DELETE FROM brolls WHERE project_id = ? AND file_name = ?", (db_proj_id, vid_name))
                 
-                # Bắn lệnh SQL xóa vĩnh viễn khỏi Database
-                cursor.execute("DELETE FROM brolls WHERE project_id = ? AND file_name = ?", (db_proj_id, vid_name))
-            
-            conn.commit()
-            conn.close()
+                conn.commit()
+                conn.close()
             
             messagebox.showinfo("Thành công", f"Đã tiễn {len(selected_vids)} file về cát bụi!")
             self.render_video_list()
@@ -771,18 +772,20 @@ class BRollTab:
         voice_dir = os.path.join(self.main_app.get_proj_dir(self.current_project_id), "Voices")
         physical_files = [f for f in os.listdir(voice_dir) if f.lower().endswith(('.mp3', '.wav', '.m4a'))] if os.path.exists(voice_dir) else []
         
-        conn = database.get_connection()
-        cursor = conn.cursor()
-        
-        # 2. Bơm ngay file mới vào DB (Bỏ qua nếu đã có)
-        for f in physical_files:
-            cursor.execute("INSERT OR IGNORE INTO voices (project_id, file_name) VALUES (?, ?)", (db_proj_id, f))
-        conn.commit()
-        
-        # 3. Hút từ DB lên (Lọc bỏ những file sếp đã xóa bằng tay trên Windows)
-        cursor.execute("SELECT file_name, usage_count, srt_cache FROM voices WHERE project_id = ? ORDER BY file_name ASC", (db_proj_id,))
-        voices = cursor.fetchall()
-        conn.close()
+        import database
+        with database.db_lock:
+            conn = database.get_connection()
+            cursor = conn.cursor()
+            
+            # 2. Bơm ngay file mới vào DB (Bỏ qua nếu đã có)
+            for f in physical_files:
+                cursor.execute("INSERT OR IGNORE INTO voices (project_id, file_name) VALUES (?, ?)", (db_proj_id, f))
+            conn.commit()
+            
+            # 3. Hút từ DB lên (Lọc bỏ những file sếp đã xóa bằng tay trên Windows)
+            cursor.execute("SELECT file_name, usage_count, srt_cache FROM voices WHERE project_id = ? ORDER BY file_name ASC", (db_proj_id,))
+            voices = cursor.fetchall()
+            conn.close()
         
         # Trong vòng lặp load_voices...
         for v in voices:
@@ -814,15 +817,16 @@ class BRollTab:
                     
                     # Bắn lệnh SQL xóa vĩnh viễn khỏi Database
                     import database
-                    conn = database.get_connection()
-                    cursor = conn.cursor()
-                    proj_name = self.main_app.projects[self.current_project_id]['name']
-                    cursor.execute("SELECT id FROM projects WHERE name = ?", (proj_name,))
-                    db_proj_id = cursor.fetchone()['id']
-                    
-                    cursor.execute("DELETE FROM voices WHERE project_id = ? AND file_name = ?", (db_proj_id, file_name))
-                    conn.commit()
-                    conn.close()
+                    with database.db_lock:
+                        conn = database.get_connection()
+                        cursor = conn.cursor()
+                        proj_name = self.main_app.projects[self.current_project_id]['name']
+                        cursor.execute("SELECT id FROM projects WHERE name = ?", (proj_name,))
+                        db_proj_id = cursor.fetchone()['id']
+                        
+                        cursor.execute("DELETE FROM voices WHERE project_id = ? AND file_name = ?", (db_proj_id, file_name))
+                        conn.commit()
+                        conn.close()
                     
                     self._clear_voice_status(self.current_project_id, file_name)
                 except Exception as e:
@@ -1129,13 +1133,14 @@ class BRollTab:
         
         # 1. Kiểm tra "Kho lưu trữ" (Database) xem đã có SRT chưa
         try:
-            conn = database.get_connection()
-            cursor = conn.cursor()
-            cursor.execute("SELECT srt_cache FROM voices WHERE project_id = ? AND file_name = ?", (db_proj_id, voice_name))
-            row = cursor.fetchone()
+            with database.db_lock:
+                conn = database.get_connection()
+                cursor = conn.cursor()
+                cursor.execute("SELECT srt_cache FROM voices WHERE project_id = ? AND file_name = ?", (db_proj_id, voice_name))
+                row = cursor.fetchone()
+                conn.close()
             
             if row and row['srt_cache'] and row['srt_cache'].strip():
-                conn.close()
                 return row['srt_cache']
         except Exception as e:
             self._log_extract(f"⚠️ Lỗi đọc DB: {str(e)}", project_id=project_id)
@@ -1154,23 +1159,25 @@ class BRollTab:
             
             if srt_text and srt_text.strip():
                 # [QUAN TRỌNG] Ghi ngay vào Database để lần sau không tốn tiền API
-                cursor.execute('''
-                    UPDATE voices 
-                    SET srt_cache = ? 
-                    WHERE project_id = ? AND file_name = ?
-                ''', (srt_text, db_proj_id, voice_name))
-                conn.commit()
+                with database.db_lock:
+                    conn = database.get_connection()
+                    cursor = conn.cursor()
+                    cursor.execute('''
+                        UPDATE voices 
+                        SET srt_cache = ? 
+                        WHERE project_id = ? AND file_name = ?
+                    ''', (srt_text, db_proj_id, voice_name))
+                    conn.commit()
+                    conn.close()
                 
                 # Cập nhật trạng thái "✅ Đã xong" lên màn hình
                 self.main_app.root.after(0, self.load_voices)
                 
-            conn.close()
             return srt_text
 
         except Exception as e:
             # Hiện thông báo lỗi đỏ chót cho sếp thấy
             self._log_extract(f"❌ Lỗi bóc SRT {voice_name}: {str(e)}", project_id=project_id)
-            if 'conn' in locals(): conn.close()
             raise
             
     def add_project_dialog(self):
@@ -2169,76 +2176,81 @@ class BRollTab:
             return
             
         try:
-            conn = database.get_connection()
-            cursor = conn.cursor()
-            
-            total_proj, total_voices, total_brolls = 0, 0, 0
-            
-            for pid, proj_info in self.main_app.projects.items():
-                proj_name = proj_info.get('name', 'Unknown')
-                if proj_name == 'Unknown': continue
+            # ============================================================
+            # [MỚI] Bọc toàn bộ migrate process vào db_lock để tránh race condition
+            # ============================================================
+            with database.db_lock:
+                conn = database.get_connection()
+                cursor = conn.cursor()
                 
-                p_data = self.main_app.get_project_data(pid)
+                total_proj, total_voices, total_brolls = 0, 0, 0
                 
-                # --- 1. BƠM PROJECT ---
-                prod_name = p_data.get("product_name", "")
-                context = p_data.get("product_context", "")
-                out_stock = 1 if p_data.get("shopee_out_of_stock", False) else 0
-                links = json.dumps(p_data.get("product_links", []))
-                ref1 = p_data.get("ref_img_1", "")
-                ref2 = p_data.get("ref_img_2", "")
-                status = proj_info.get("status", "active")
-                
-                cursor.execute("SELECT id FROM projects WHERE name = ?", (proj_name,))
-                row = cursor.fetchone()
-                if row:
-                    db_proj_id = row['id']
-                    cursor.execute('''UPDATE projects SET 
-                        product_name=?, product_context=?, shopee_out_of_stock=?, product_links=?, ref_img_1=?, ref_img_2=?, status=? 
-                        WHERE id=?''', (prod_name, context, out_stock, links, ref1, ref2, status, db_proj_id))
-                else:
-                    cursor.execute('''INSERT INTO projects 
-                        (name, product_name, product_context, shopee_out_of_stock, product_links, ref_img_1, ref_img_2, status) 
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)''', 
-                        (proj_name, prod_name, context, out_stock, links, ref1, ref2, status))
-                    db_proj_id = cursor.lastrowid
-                total_proj += 1
-                
-                # --- 2. BƠM VOICE ---
-                voice_usage = p_data.get("voice_usage", {})
-                voice_srt = p_data.get("voice_srt_cache", {})
-                for v_name, usage in voice_usage.items():
-                    srt = voice_srt.get(v_name, "")
-                    cursor.execute('''INSERT OR IGNORE INTO voices (project_id, file_name, usage_count, srt_cache)
-                        VALUES (?, ?, ?, ?)''', (db_proj_id, v_name, int(usage), srt))
-                    total_voices += 1
-                
-                # --- 3. BƠM BROLL (ĐANG DÙNG) ---
-                videos = p_data.get("videos", {})
-                for b_name, b_info in videos.items():
-                    dur = b_info.get("duration", 0)
-                    desc = b_info.get("description", "")
-                    usage = b_info.get("usage_count", 0)
-                    keep_audio = 1 if b_info.get("keep_audio", False) else 0
+                for pid, proj_info in self.main_app.projects.items():
+                    proj_name = proj_info.get('name', 'Unknown')
+                    if proj_name == 'Unknown': continue
                     
-                    cursor.execute('''INSERT OR REPLACE INTO brolls (project_id, file_name, duration, description, usage_count, keep_audio, status)
-                        VALUES (?, ?, ?, ?, ?, ?, 'active')''', (db_proj_id, b_name, dur, desc, int(usage), keep_audio))
-                    total_brolls += 1
+                    p_data = self.main_app.get_project_data(pid)
                     
-                # --- 4. BƠM BROLL (THÙNG RÁC) ---
-                trash = p_data.get("trash", {})
-                for b_name, b_info in trash.items():
-                    dur = b_info.get("duration", 0)
-                    desc = b_info.get("description", "")
-                    usage = b_info.get("usage_count", 0)
-                    keep_audio = 1 if b_info.get("keep_audio", False) else 0
+                    # --- 1. BƠM PROJECT ---
+                    prod_name = p_data.get("product_name", "")
+                    context = p_data.get("product_context", "")
+                    out_stock = 1 if p_data.get("shopee_out_of_stock", False) else 0
+                    links = json.dumps(p_data.get("product_links", []))
+                    ref1 = p_data.get("ref_img_1", "")
+                    ref2 = p_data.get("ref_img_2", "")
+                    status = proj_info.get("status", "active")
                     
-                    cursor.execute('''INSERT OR REPLACE INTO brolls (project_id, file_name, duration, description, usage_count, keep_audio, status)
-                        VALUES (?, ?, ?, ?, ?, ?, 'trash')''', (db_proj_id, b_name, dur, desc, int(usage), keep_audio))
-                    total_brolls += 1
+                    cursor.execute("SELECT id FROM projects WHERE name = ?", (proj_name,))
+                    row = cursor.fetchone()
+                    if row:
+                        db_proj_id = row['id']
+                        cursor.execute('''UPDATE projects SET 
+                            product_name=?, product_context=?, shopee_out_of_stock=?, product_links=?, ref_img_1=?, ref_img_2=?, status=? 
+                            WHERE id=?''', (prod_name, context, out_stock, links, ref1, ref2, status, db_proj_id))
+                    else:
+                        cursor.execute('''INSERT INTO projects 
+                            (name, product_name, product_context, shopee_out_of_stock, product_links, ref_img_1, ref_img_2, status) 
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)''', 
+                            (proj_name, prod_name, context, out_stock, links, ref1, ref2, status))
+                        db_proj_id = cursor.lastrowid
+                    total_proj += 1
+                    
+                    # --- 2. BƠM VOICE ---
+                    voice_usage = p_data.get("voice_usage", {})
+                    voice_srt = p_data.get("voice_srt_cache", {})
+                    for v_name, usage in voice_usage.items():
+                        srt = voice_srt.get(v_name, "")
+                        cursor.execute('''INSERT OR IGNORE INTO voices (project_id, file_name, usage_count, srt_cache)
+                            VALUES (?, ?, ?, ?)''', (db_proj_id, v_name, int(usage), srt))
+                        total_voices += 1
+                    
+                    # --- 3. BƠM BROLL (ĐANG DÙNG) ---
+                    videos = p_data.get("videos", {})
+                    for b_name, b_info in videos.items():
+                        dur = b_info.get("duration", 0)
+                        desc = b_info.get("description", "")
+                        usage = b_info.get("usage_count", 0)
+                        keep_audio = 1 if b_info.get("keep_audio", False) else 0
+                        
+                        cursor.execute('''INSERT OR REPLACE INTO brolls (project_id, file_name, duration, description, usage_count, keep_audio, status)
+                            VALUES (?, ?, ?, ?, ?, ?, 'active')''', (db_proj_id, b_name, dur, desc, int(usage), keep_audio))
+                        total_brolls += 1
+                        
+                    # --- 4. BƠM BROLL (THÙNG RÁC) ---
+                    trash = p_data.get("trash", {})
+                    for b_name, b_info in trash.items():
+                        dur = b_info.get("duration", 0)
+                        desc = b_info.get("description", "")
+                        usage = b_info.get("usage_count", 0)
+                        keep_audio = 1 if b_info.get("keep_audio", False) else 0
+                        
+                        cursor.execute('''INSERT OR REPLACE INTO brolls (project_id, file_name, duration, description, usage_count, keep_audio, status)
+                            VALUES (?, ?, ?, ?, ?, ?, 'trash')''', (db_proj_id, b_name, dur, desc, int(usage), keep_audio))
+                        total_brolls += 1
+                
+                conn.commit()
+                conn.close()
             
-            conn.commit()
-            conn.close()
             messagebox.showinfo("Thành công", f"🎉 ĐÃ HÚT SẠCH DỮ LIỆU TỪ JSON!\n\n- {total_proj} Projects\n- {total_voices} file Voice\n- {total_brolls} file Cảnh Trám (cả Active lẫn Trash)")
             
         except Exception as e:
