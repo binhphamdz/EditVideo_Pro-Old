@@ -267,7 +267,7 @@ def get_transcription(voice_path, voice_name, mode, config, log_cb):
             try: drive_service.files().delete(fileId=file_id).execute()
             except: pass
 
-def get_director_timeline(voice_text, broll_text, config, log_cb, voice_name):
+def get_director_timeline(voice_text, broll_text, config, log_cb, voice_name, project_context=""):
     import time
     import requests
     import json
@@ -304,9 +304,16 @@ def get_director_timeline(voice_text, broll_text, config, log_cb, voice_name):
     # =========================================================
     # VÒNG 1: TRỢ LÝ AI (CÓ CƠ CHẾ THỬ LẠI 3 LẦN)
     # =========================================================
-    log_cb(f"[{voice_name}] Đạo diễn AI Vòng 1: Đang lọc rổ video ứng viên...")
+    # Chuẩn bị bối cảnh dự án để nhét vào prompt
+    context_line = f"BỐI CẢNH SẢN PHẨM ĐANG QUẢNG CÁO: {project_context}" if project_context and project_context != "Không có mô tả cụ thể." else ""
+    log_cb(f"[{voice_name}] Đạo diễn AI Vòng 1: Đang phân tích bối cảnh & lọc rổ video...")
+    if context_line:
+        log_cb(f"[{voice_name}] 🎯 Context: {project_context[:60]}..." if len(project_context) > 60 else f"[{voice_name}] 🎯 Context: {project_context}")
     
-    prompt_1 = f"""Dưới đây là Kho video có kèm theo MÔ TẢ CHI TIẾT và [SỐ LẦN ĐÃ DÙNG] của từng cảnh:
+    prompt_1 = f"""BẠN LÀ ĐẠO DIỄN PHIM CHUYÊN NGHIỆP.
+{context_line}
+
+Dưới đây là Kho video có kèm theo MÔ TẢ CHI TIẾT và [SỐ LẦN ĐÃ DÙNG] của từng cảnh:
 {broll_text}
 
 Nội dung Voice (Giọng đọc):
@@ -314,7 +321,7 @@ Nội dung Voice (Giọng đọc):
 
 VÒNG 1 - TÌM KIẾM ỨNG VIÊN:
 1. Đọc kỹ từng câu thoại.
-2. Chọn ra TỪ 3 ĐẾN 5 VIDEO ỨNG VIÊN phù hợp nhất về mặt ngữ nghĩa cho câu thoại đó.
+2. Chọn ra TỪ 3 ĐẾN 5 VIDEO ỨNG VIÊN phù hợp nhất về mặt ngữ nghĩa VÀ BỐI CẢNH SẢN PHẨM cho câu thoại đó.
 3. Ưu tiên nhặt những video có "Đã dùng: 0 lần" hoặc số lần dùng thấp.
 4. BẮT BUỘC trả về ĐÚNG CÚ PHÁP JSON (có dấu ngoặc kép ở các key):
 [ {{"start": 0.0, "end": 2.5, "text": "...", "candidates": ["vid1.mp4", "vid2.mp4"]}} ]"""
@@ -342,7 +349,10 @@ VÒNG 1 - TÌM KIẾM ỨNG VIÊN:
     
     candidates_json_str = json.dumps(raw_timeline, ensure_ascii=False, indent=2)
     
-    prompt_2 = f"""Dưới đây là Kịch bản nháp (gồm start/end của câu thoại) và danh sách Video Ứng Viên:
+    prompt_2 = f"""BẠN LÀ ĐẠO DIỄN PHIM CHUYÊN NGHIỆP.
+{context_line}
+
+Dưới đây là Kịch bản nháp (gồm start/end của câu thoại) và danh sách Video Ứng Viên:
 {candidates_json_str}
 
 Thông tin chi tiết (Độ dài giây, Mô tả, Số lần dùng) của toàn bộ kho:

@@ -466,10 +466,19 @@ class FacelessTab:
             pid = self.pid_map.get(proj_name)
             
             # =======================================================
-            # 1. KẾT NỐI DATABASE & LẤY ID AN TOÀN (CHỐNG CRASH)
+            # 1. KẾT NỐI DATABASE & LẤY ID + BỐI CẢNH DỰ ÁN
             # =======================================================
             import database
             db_proj_id = database.get_or_create_project(proj_name)
+
+            # Lấy thêm product_context để truyền cho AI Đạo diễn
+            with database.db_lock:
+                conn = database.get_connection()
+                cursor = conn.cursor()
+                cursor.execute("SELECT product_context FROM projects WHERE id = ?", (db_proj_id,))
+                p_row = cursor.fetchone()
+                proj_context = p_row['product_context'] if (p_row and p_row['product_context']) else "Không có mô tả cụ thể."
+                conn.close()
             # =======================================================
             # 2. BÓC BĂNG (Lấy nội dung chữ từ file âm thanh)
             # =======================================================
@@ -511,7 +520,7 @@ class FacelessTab:
             # =======================================================
             # 4. GỌI AI ĐẠO DIỄN (Lên kịch bản cắt ghép)
             # =======================================================
-            timeline = get_director_timeline(voice_text, broll_text, self.main_app.config, self.add_log, voice_name)
+            timeline = get_director_timeline(voice_text, broll_text, self.main_app.config, self.add_log, voice_name, proj_context)
             
             # =======================================================
             # 5. RENDER VIDEO & GHI JOB SHOPEE (DATABASE)
