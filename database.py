@@ -7,7 +7,26 @@ DB_PATH = os.path.join(BASE_PATH, "data_system.db")
 def get_connection():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    
+    # [QUAN TRỌNG] Bật công tắc Khóa Ngoại để ON DELETE CASCADE tự động dọn rác
+    conn.execute("PRAGMA foreign_keys = ON;") 
+    
     return conn
+
+def get_or_create_project(proj_name):
+    """Lấy ID của Project, nếu chưa có thì tự động tạo mới để chống crash"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id FROM projects WHERE name = ?", (proj_name,))
+    row = cursor.fetchone()
+    if row:
+        pid = row['id']
+    else:
+        cursor.execute("INSERT INTO projects (name) VALUES (?)", (proj_name,))
+        pid = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return pid
 
 def init_db():
     conn = get_connection()
@@ -74,6 +93,8 @@ def init_db():
             FOREIGN KEY (project_id) REFERENCES projects (id)
         )
     ''')
+
+    
 
     conn.commit()
     conn.close()

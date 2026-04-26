@@ -757,35 +757,41 @@ class BRollTab:
             self.render_video_list(reset_pages=True)
 
     def load_voices(self):
-        # Dọn sạch bảng cũ
         for item in self.tree_voices.get_children(): 
             self.tree_voices.delete(item)
             
         if not self.current_project_id: return
         
-        # Gọi Database
         import database
+        import os
+        proj_name = self.main_app.projects[self.current_project_id]['name']
+        db_proj_id = database.get_or_create_project(proj_name)
+        
+        # 1. Quét file vật lý trước để tìm các file mp3 sếp mới copy tay vào
+        voice_dir = os.path.join(self.main_app.get_proj_dir(self.current_project_id), "Voices")
+        physical_files = [f for f in os.listdir(voice_dir) if f.lower().endswith(('.mp3', '.wav', '.m4a'))] if os.path.exists(voice_dir) else []
+        
         conn = database.get_connection()
         cursor = conn.cursor()
         
-        # 1. Lấy ID của Project hiện tại từ DB
-        proj_name = self.main_app.projects[self.current_project_id]['name']
-        cursor.execute("SELECT id FROM projects WHERE name = ?", (proj_name,))
-        row = cursor.fetchone()
-        if not row: return
-        db_proj_id = row['id']
+        # 2. Bơm ngay file mới vào DB (Bỏ qua nếu đã có)
+        for f in physical_files:
+            cursor.execute("INSERT OR IGNORE INTO voices (project_id, file_name) VALUES (?, ?)", (db_proj_id, f))
+        conn.commit()
         
-        # 2. Truy vấn toàn bộ Voice của Project này
+        # 3. Hút từ DB lên (Lọc bỏ những file sếp đã xóa bằng tay trên Windows)
         cursor.execute("SELECT file_name, usage_count, srt_cache FROM voices WHERE project_id = ? ORDER BY file_name ASC", (db_proj_id,))
         voices = cursor.fetchall()
         conn.close()
         
-        # 3. Đổ lên giao diện
+        # Trong vòng lặp load_voices...
         for v in voices:
             f_name = v['file_name']
-            count = v['usage_count']
-            status_text = "✅ Đã xong" if v['srt_cache'] else "⏳ Chờ bóc SRT"
-            self.tree_voices.insert("", "end", iid=f_name, values=(f_name, f"{count} lần", status_text))
+            if f_name in physical_files:
+                count = v['usage_count']
+                # Nếu srt_cache có dữ liệu (không phải None hoặc rỗng) thì báo Xong
+                status_text = "✅ Đã xong" if (v['srt_cache'] and v['srt_cache'].strip()) else "⏳ Chờ bóc SRT"
+                self.tree_voices.insert("", "end", iid=f_name, values=(f_name, f"{count} lần", status_text))
 
     def play_voice(self):
         selected = self.tree_voices.selection()
@@ -1115,30 +1121,56 @@ class BRollTab:
         return None
     
     def get_voice_srt_or_extract(self, project_id, voice_name, voice_path):
-        """[MỚI] Lấy SRT từ cache, nếu chưa có thì extract (blocking)"""
-        p_data = self.main_app.get_project_data(project_id)
+        import database
+        from tab2_modules.ai_services import get_transcription
         
-        # 1. Check cache trước
-        if "voice_srt_cache" in p_data and voice_name in p_data["voice_srt_cache"]:
-            cached_srt = p_data["voice_srt_cache"][voice_name]
-            if self._detect_voice_test_intro_end(cached_srt) <= 0:
-                return cached_srt
-            self._log_extract(f"⚠️ Phát hiện voice {voice_name} còn câu test trong cache, đang bóc lại...", project_id=project_id)
+        proj_name = self.main_app.projects[project_id]['name']
+        db_proj_id = database.get_or_create_project(proj_name)
         
-        # 2. Nếu chưa cache hoặc cache còn câu test, extract ngay (blocking call)
+        # 1. Kiểm tra "Kho lưu trữ" (Database) xem đã có SRT chưa
         try:
-            srt_text = self._transcribe_voice_with_auto_trim(project_id, voice_name, voice_path)
+            conn = database.get_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT srt_cache FROM voices WHERE project_id = ? AND file_name = ?", (db_proj_id, voice_name))
+            row = cursor.fetchone()
             
-            # Lưu vào cache
-            if "voice_srt_cache" not in p_data:
-                p_data["voice_srt_cache"] = {}
-            p_data["voice_srt_cache"][voice_name] = srt_text
-            self.main_app.save_project_data(project_id, p_data)
-            self._log_extract(f"✅ Đã bóp SRT xong: {voice_name}", project_id=project_id)
-            
-            return srt_text
+            if row and row['srt_cache'] and row['srt_cache'].strip():
+                conn.close()
+                return row['srt_cache']
         except Exception as e:
+            self._log_extract(f"⚠️ Lỗi đọc DB: {str(e)}", project_id=project_id)
+
+        # 2. Nếu chưa có, tiến hành bóc băng mới
+        try:
+            self._log_extract(f"🎙️ Đang bóc băng mới: {voice_name}...", project_id=project_id)
+            
+            srt_text = get_transcription(
+                voice_path, 
+                voice_name, 
+                self.main_app.config.get("boc_bang_mode", "groq"), 
+                self.main_app.config, 
+                lambda msg: self._log_extract(msg, project_id=project_id)
+            )
+            
+            if srt_text and srt_text.strip():
+                # [QUAN TRỌNG] Ghi ngay vào Database để lần sau không tốn tiền API
+                cursor.execute('''
+                    UPDATE voices 
+                    SET srt_cache = ? 
+                    WHERE project_id = ? AND file_name = ?
+                ''', (srt_text, db_proj_id, voice_name))
+                conn.commit()
+                
+                # Cập nhật trạng thái "✅ Đã xong" lên màn hình
+                self.main_app.root.after(0, self.load_voices)
+                
+            conn.close()
+            return srt_text
+
+        except Exception as e:
+            # Hiện thông báo lỗi đỏ chót cho sếp thấy
             self._log_extract(f"❌ Lỗi bóc SRT {voice_name}: {str(e)}", project_id=project_id)
+            if 'conn' in locals(): conn.close()
             raise
             
     def add_project_dialog(self):

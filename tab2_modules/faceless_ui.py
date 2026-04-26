@@ -428,31 +428,39 @@ class FacelessTab:
     def _process_single(self, voice_name, proj_dir, proj_name):
         from main import GLOBAL_OUT_DIR
         import database
-        from .video_engine import render_faceless_video, get_vid_info
+        from .video_engine import render_faceless_video
         from .ai_services import get_transcription, get_director_timeline
         from datetime import datetime
         import os
         
         try:
             voice_path = os.path.join(proj_dir, "Voices", voice_name)
+            # Tạo tên file đầu ra: [Tên Project] Tên Voice_GiờPhútGiây.mp4
             out_file = os.path.join(GLOBAL_OUT_DIR, f"[{proj_name}] {os.path.splitext(voice_name)[0]}_{datetime.now().strftime('%H%M%S')}.mp4")
-            pid = self.pid_map[proj_name]
+            pid = self.pid_map.get(proj_name)
             
-            # 1. Kết nối Database
+            # =======================================================
+            # 1. KẾT NỐI DATABASE & LẤY ID AN TOÀN (CHỐNG CRASH)
+            # =======================================================
+            import database
+            db_proj_id = database.get_or_create_project(proj_name)
             conn = database.get_connection()
             cursor = conn.cursor()
-            cursor.execute("SELECT id FROM projects WHERE name = ?", (proj_name,))
-            db_proj_id = cursor.fetchone()['id']
             
-            # 2. Bóc băng (Giữ nguyên logic của sếp)
+            # =======================================================
+            # 2. BÓC BĂNG (Lấy nội dung chữ từ file âm thanh)
+            # =======================================================
             try:
+                # Ưu tiên lấy từ cache SRT đã bóc ở Tab 1
                 voice_text = self.main_app.tab1.get_voice_srt_or_extract(pid, voice_name, voice_path)
                 self.add_log(f"[{voice_name}] ✅ Dùng SRT (cache hoặc extract mới)")
             except Exception as e:
                 self.add_log(f"[{voice_name}] ⚠️ Fallback extract: {str(e)[:50]}")
                 voice_text = get_transcription(voice_path, voice_name, self.main_app.config.get("boc_bang_mode", "groq"), self.main_app.config, self.add_log)
             
-            # 3. Lấy thông tin Broll từ Database
+            # =======================================================
+            # 3. LẤY KHO CẢNH TRÁM (BROLL) TỪ DATABASE
+            # =======================================================
             cursor.execute("SELECT file_name, duration, description, usage_count, keep_audio FROM brolls WHERE project_id = ? AND status = 'active'", (db_proj_id,))
             broll_rows = cursor.fetchall()
             
@@ -460,53 +468,69 @@ class FacelessTab:
             broll_text = ""
             for r in broll_rows:
                 v = r['file_name']
+                # Tính độ dài thực tế sau khi áp dụng tốc độ video (config)
                 dur = round(r['duration'] / self.main_app.config.get('video_speed', 1.0), 1)
                 desc = r['description'] or ""
                 usage = r['usage_count']
-                broll_data[v] = {'usage_count': usage, 'keep_audio': bool(r['keep_audio']), 'duration': r['duration'], 'description': desc}
+                
+                broll_data[v] = {
+                    'usage_count': usage, 
+                    'keep_audio': bool(r['keep_audio']), 
+                    'duration': r['duration'], 
+                    'description': desc
+                }
                 broll_text += f"- File: '{v}' (Dài {dur}s) | Đã dùng: {usage} lần | Mô tả: {desc}\n"
 
-            # 4. Gọi AI Đạo Diễn 
+            # =======================================================
+            # 4. GỌI AI ĐẠO DIỄN (Lên kịch bản cắt ghép)
+            # =======================================================
             timeline = get_director_timeline(voice_text, broll_text, self.main_app.config, self.add_log, voice_name)
             
-            # 5. Render Video và Ghi vào Database Shopee
+            # =======================================================
+            # 5. RENDER VIDEO & GHI JOB SHOPEE (DATABASE)
+            # =======================================================
             from shopee_export import export_rendered_video_to_shopee_files, is_shopee_out_of_stock_project
             
+            # Hàm render giờ đây sẽ trả về danh sách chính xác các file Broll nó đã dùng
             actual_used_brolls = render_faceless_video(
                 voice_name, voice_path, timeline, proj_dir, proj_name, 
                 self.main_app.config, out_file, GLOBAL_OUT_DIR, self.add_log, broll_data
             )
             
+            # Kiểm tra xem project có đang bật "Hết hàng" không để quyết định ghi job Shopee
             shopee_out_of_stock = is_shopee_out_of_stock_project(proj_dir)
             if shopee_out_of_stock:
-                self.add_log(f"[{voice_name}] ⏭️ Shopee đang để Hết hàng, bỏ qua ghi file job đăng.")
+                self.add_log(f"[{voice_name}] ⏭️ Shopee đang để Hết hàng, bỏ qua lưu Job đăng bài.")
             else:
-                exported_to_shopee, shopee_export_path = export_rendered_video_to_shopee_files(proj_dir, out_file, config=self.main_app.config, default_status="Chưa đăng")
+                exported_to_shopee, _ = export_rendered_video_to_shopee_files(proj_dir, out_file, config=self.main_app.config, default_status="Chưa đăng")
                 if exported_to_shopee:
-                    self.add_log(f"[{voice_name}] ✅ Đã ghi Job Shopee vào Database.")
+                    self.add_log(f"[{voice_name}] ✅ Đã lưu Job đăng Shopee vào Database.")
 
             self.completed_count += 1
-            self.add_log(f"✅ THÀNH CÔNG: Đã lưu {voice_name}!")
+            self.add_log(f"✅ THÀNH CÔNG: Đã xuất xưởng {voice_name}!")
             
-            # 6. Cộng điểm chính xác vào Database
+            # =======================================================
+            # 6. CỘNG ĐIỂM SỬ DỤNG (UPDATE DATABASE SIÊU TỐC)
+            # =======================================================
             try:
-                # Cộng điểm Voice
+                # Cộng 1 lượt dùng cho file Voice
                 cursor.execute("UPDATE voices SET usage_count = usage_count + 1 WHERE project_id = ? AND file_name = ?", (db_proj_id, voice_name))
                 
-                # Cộng điểm Broll
+                # Cộng 1 lượt dùng cho từng cảnh trám thực tế đã xuất hiện trong video
                 if actual_used_brolls:
                     for v_name in actual_used_brolls:
                         cursor.execute("UPDATE brolls SET usage_count = usage_count + 1 WHERE project_id = ? AND file_name = ?", (db_proj_id, v_name))
                 
                 conn.commit()
                 
+                # Cập nhật lại giao diện Tab 1 để sếp thấy điểm nhảy ngay lập tức
                 self.main_app.root.after(0, self.main_app.tab1.load_voices)
                 if self.main_app.tab1.current_project_id == pid:
                     self.main_app.root.after(0, lambda: self.main_app.tab1.render_video_list())
             except Exception as e:
                 self.add_log(f"⚠️ Lỗi cập nhật Database số lần dùng: {e}")
             finally:
-                conn.close() 
+                conn.close() # Quan trọng: Luôn đóng kết nối sau khi xong việc
 
         except Exception as e:
-            self.add_log(f"❌ LỖI {voice_name}: {e}")
+            self.add_log(f"❌ LỖI NGHIÊM TRỌNG {voice_name}: {e}")
