@@ -10,10 +10,7 @@ from .ai_services import get_transcription, get_director_timeline
 from .video_engine import render_faceless_video
 from paths import BASE_PATH, resource_path
 
-# ==========================================
-# 1. TẠO Ổ KHÓA CHỐNG KẸT FILE JSON (CỰC QUAN TRỌNG)
-# ==========================================
-json_save_lock = threading.Lock()
+
 
 class FacelessTab:
     def __init__(self, parent, main_app):
@@ -311,6 +308,7 @@ class FacelessTab:
         import random
         import threading
         from paths import BASE_PATH
+        import database
 
         proj_name = self.combo_proj.get()
         if not proj_name: 
@@ -330,36 +328,32 @@ class FacelessTab:
         if not all_voices: 
             return bot.send_message(chat_id, "❌ Kho Voice trống trơn! Sếp nạp thêm đạn vào đi.")
 
-        # Lấy sổ nợ
-        project_data = self.main_app.get_project_data(pid)
-        voice_usage = project_data.get("voice_usage", {})
+        # --- [BẢN ĐỘ MỚI] Lấy sổ nợ từ Database ---
+        conn = database.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM projects WHERE name = ?", (proj_name,))
+        db_proj_id = cursor.fetchone()['id']
+        
+        cursor.execute("SELECT file_name, usage_count FROM voices WHERE project_id = ?", (db_proj_id,))
+        voice_usage = {r['file_name']: r['usage_count'] for r in cursor.fetchall()}
+        conn.close()
 
-        # --- [BẢN ĐỘ TỐI THƯỢNG CHO BOT] ---
-        # 1. Trộn bài ngẫu nhiên
         random.shuffle(all_voices)
         
-        # 2. Thuật toán lấy số lần dùng siêu chuẩn (Chống lỗi Hoa/Thường + Ép kiểu số)
         def get_usage_for_bot(v_name):
             for k, v in voice_usage.items():
-                if k.lower() == v_name.lower():
-                    return int(v)
+                if k.lower() == v_name.lower(): return int(v)
             return 0
             
-        # 3. Ép Bot ưu tiên bốc file ít dùng nhất
         all_voices.sort(key=get_usage_for_bot)
-        
-        # (Tùy chọn) Sếp có thể giới hạn Bot chỉ render 5-10 video mỗi lần gọi để tránh quá tải
         all_voices = all_voices[:3] 
 
-        # Truyền đường dẫn gốc để Bot hiểu
         self.main_app.config["app_base_path"] = BASE_PATH 
-
-        bot.send_message(chat_id, f"🎬 ĐẠO DIỄN AI NHẬN LỆNH!\n📁 Project: {proj_name}\n🎙️ Đã lọc ra {len(all_voices)} video (Ưu tiên Voice mới tinh). Đang đưa vào lò xào nấu...")
-        
-        # Bắn lệnh cho FFmpeg chạy ngầm
+        bot.send_message(chat_id, f"🎬 ĐẠO DIỄN AI NHẬN LỆNH!\n📁 Project: {proj_name}\n🎙️ Đã lọc ra {len(all_voices)} video. Đang đưa vào lò xào nấu...")
         threading.Thread(target=self._run_multithread_batch, args=(all_voices, proj_dir, proj_name, bot, chat_id), daemon=True).start()
 
     def start_batch_process(self):
+        import database
         proj_name = self.combo_proj.get()
         selected_indices = self.lst_voices.curselection()
         
@@ -372,39 +366,36 @@ class FacelessTab:
             if not selected_trans:
                 return messagebox.showwarning("Lỗi", "Vui lòng chọn ít nhất 1 Hiệu Ứng Chuyển Cảnh!")
         
-        # Lưu config
         self._save_config_auto()
         if self.use_trans.get():
             self._save_selected_transitions()
+        from paths import BASE_PATH
         self.main_app.config["app_base_path"] = BASE_PATH
         self.main_app.save_config()
 
-        # 1. Lấy danh sách Voice sếp đã bôi đen
         voices = [self.lst_voices.get(i) for i in selected_indices]
         
-        # =======================================================
-        # [BẢN ĐỘ MỚI] DẠY CHO NÚT RENDER BIẾT CÁCH ƯU TIÊN FILE ÍT DÙNG
-        # =======================================================
+        # --- [BẢN ĐỘ MỚI] Lấy sổ nợ từ Database ---
         import random
-        random.shuffle(voices) # Xáo trộn ngẫu nhiên để chống lặp thứ tự
+        random.shuffle(voices)
         
-        pid = self.pid_map[proj_name]
-        project_data = self.main_app.get_project_data(pid)
-        voice_usage = project_data.get("voice_usage", {})
+        conn = database.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM projects WHERE name = ?", (proj_name,))
+        db_proj_id = cursor.fetchone()['id']
+        
+        cursor.execute("SELECT file_name, usage_count FROM voices WHERE project_id = ?", (db_proj_id,))
+        voice_usage = {r['file_name']: r['usage_count'] for r in cursor.fetchall()}
+        conn.close()
 
         def get_usage_for_gui(v_name):
             for k, v in voice_usage.items():
-                if k.lower() == v_name.lower():
-                    return int(v)
+                if k.lower() == v_name.lower(): return int(v)
             return 0
             
-        # Thuật toán thần thánh: Đẩy thằng 0-1 lượt lên đầu, đạp thằng 7 lượt xuống đáy
         voices.sort(key=get_usage_for_gui)
         
-        # (TÙY CHỌN) Nếu sếp bôi đen 10 file nhưng chỉ muốn nó xào 3 file ít dùng nhất, sếp bỏ dấu # ở dòng dưới:
-        # voices = voices[:3]
-        # =======================================================
-
+        pid = self.pid_map[proj_name]
         proj_dir = self.main_app.get_proj_dir(pid)
         
         self.btn_run_batch.config(state="disabled", text="⏳ ĐANG RENDER...")
@@ -436,39 +427,47 @@ class FacelessTab:
 
     def _process_single(self, voice_name, proj_dir, proj_name):
         from main import GLOBAL_OUT_DIR, EXCEL_LOG_FILE 
+        import database
+        
         try:
             voice_path = os.path.join(proj_dir, "Voices", voice_name)
             out_file = os.path.join(GLOBAL_OUT_DIR, f"[{proj_name}] {os.path.splitext(voice_name)[0]}_{datetime.now().strftime('%H%M%S')}.mp4")
-            
             pid = self.pid_map[proj_name]
             
-            # 1. Bóc băng [CẬP NHẬT] Dùng cache từ Tab 1 nếu có sẵn
+            # 1. Kết nối Database
+            conn = database.get_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT id FROM projects WHERE name = ?", (proj_name,))
+            db_proj_id = cursor.fetchone()['id']
+            
+            # 2. Bóc băng
             try:
                 voice_text = self.main_app.tab1.get_voice_srt_or_extract(pid, voice_name, voice_path)
                 self.add_log(f"[{voice_name}] ✅ Dùng SRT (cache hoặc extract mới)")
             except Exception as e:
-                # Fallback: Nếu Tab 1 không có, extract trực tiếp
                 self.add_log(f"[{voice_name}] ⚠️ Fallback extract: {str(e)[:50]}")
                 voice_text = get_transcription(voice_path, voice_name, self.main_app.config.get("boc_bang_mode", "groq"), self.main_app.config, self.add_log)
             
             # =======================================================
-            # [Ổ KHÓA SỐ 1] Ghi trí nhớ điểm Broll gửi cho AI
+            # [Ổ KHÓA CŨ ĐÃ BỊ PHÁ] Lấy danh sách Broll từ Database
             # =======================================================
-            with json_save_lock:
-                project_data = self.main_app.get_project_data(pid)
-                broll_data = project_data.get('videos', {})
-                
-                broll_text = ""
-                for v, info in broll_data.items():
-                    dur = round(info.get('duration', 0) / self.main_app.config.get('video_speed', 1.0), 1)
-                    desc = info.get('description', '')
-                    usage = info.get('usage_count', 0) 
-                    broll_text += f"- File: '{v}' (Dài {dur}s) | Đã dùng: {usage} lần | Mô tả: {desc}\n"
+            cursor.execute("SELECT file_name, duration, description, usage_count, keep_audio FROM brolls WHERE project_id = ? AND status = 'active'", (db_proj_id,))
+            broll_rows = cursor.fetchall()
+            
+            broll_data = {}
+            broll_text = ""
+            for r in broll_rows:
+                v = r['file_name']
+                dur = round(r['duration'] / self.main_app.config.get('video_speed', 1.0), 1)
+                desc = r['description'] or ""
+                usage = r['usage_count']
+                broll_data[v] = {'usage_count': usage, 'keep_audio': bool(r['keep_audio']), 'duration': r['duration'], 'description': desc}
+                broll_text += f"- File: '{v}' (Dài {dur}s) | Đã dùng: {usage} lần | Mô tả: {desc}\n"
 
-            # 3. Gọi AI Đạo Diễn (Chạy ngoài ổ khóa)
+            # 3. Gọi AI Đạo Diễn 
             timeline = get_director_timeline(voice_text, broll_text, self.main_app.config, self.add_log, voice_name)
             
-            # 5. Render Video (BẮT LẤY danh sách Broll thực tế đã bị nhét vào lò)
+            # 4. Render Video 
             actual_used_brolls = render_faceless_video(
                 voice_name, voice_path, timeline, proj_dir, proj_name, 
                 self.main_app.config, out_file, GLOBAL_OUT_DIR, EXCEL_LOG_FILE, self.add_log, broll_data
@@ -478,32 +477,26 @@ class FacelessTab:
             self.add_log(f"✅ THÀNH CÔNG: Đã lưu {voice_name}!")
             
             # =======================================================
-            # [Ổ KHÓA SỐ 3] - BẢO VỆ TUYỆT ĐỐI SỐ LẦN DÙNG CỦA CẢ VOICE VÀ BROLL
+            # [SIÊU NHÂN DATABASE] - CỘNG ĐIỂM SIÊU TỐC KHÔNG CẦN KHÓA
             # =======================================================
             try:
-                with json_save_lock:
-                    fresh_p_data = self.main_app.get_project_data(pid) 
-                    
-                    # 1. CỘNG ĐIỂM VOICE
-                    if "voice_usage" not in fresh_p_data: 
-                        fresh_p_data["voice_usage"] = {}
-                    fresh_p_data["voice_usage"][voice_name] = fresh_p_data["voice_usage"].get(voice_name, 0) + 1
-                    
-                    # 2. CỘNG ĐIỂM BROLL (Dựa trên danh sách actual_used_brolls FFmpeg báo về)
-                    if actual_used_brolls and 'videos' in fresh_p_data:
-                        for v_name in actual_used_brolls:
-                            if v_name in fresh_p_data['videos']:
-                                current_usage = fresh_p_data['videos'][v_name].get('usage_count', 0)
-                                fresh_p_data['videos'][v_name]['usage_count'] = current_usage + 1
-                    
-                    self.main_app.save_project_data(pid, fresh_p_data)
-                    
+                # Cộng điểm Voice
+                cursor.execute("UPDATE voices SET usage_count = usage_count + 1 WHERE project_id = ? AND file_name = ?", (db_proj_id, voice_name))
+                
+                # Cộng điểm Broll
+                if actual_used_brolls:
+                    for v_name in actual_used_brolls:
+                        cursor.execute("UPDATE brolls SET usage_count = usage_count + 1 WHERE project_id = ? AND file_name = ?", (db_proj_id, v_name))
+                
+                conn.commit()
+                
                 self.main_app.root.after(0, self.main_app.tab1.load_voices)
-                # Cập nhật thêm giao diện list Broll để thấy số nhảy lên
                 if self.main_app.tab1.current_project_id == pid:
                     self.main_app.root.after(0, lambda: self.main_app.tab1.render_video_list())
             except Exception as e:
                 self.add_log(f"⚠️ Lỗi cập nhật số lần dùng: {e}")
+            finally:
+                conn.close() # Dùng xong trả lại kết nối
 
         except Exception as e:
             self.add_log(f"❌ LỖI {voice_name}: {e}")

@@ -392,8 +392,13 @@ class BRollTab:
             folder_name = "Broll_Trash" if is_trash_tab else "Broll"
             target_dir = os.path.join(proj_dir, folder_name)
             
-            p_data = self.main_app.get_project_data(self.current_project_id)
-            dict_key = "trash" if is_trash_tab else "videos"
+            # --- [BẢN ĐỘ MỚI] KẾT NỐI DATABASE ---
+            import database
+            conn = database.get_connection()
+            cursor = conn.cursor()
+            proj_name = self.main_app.projects[self.current_project_id]['name']
+            cursor.execute("SELECT id FROM projects WHERE name = ?", (proj_name,))
+            db_proj_id = cursor.fetchone()['id']
             
             for vid_name in selected_vids:
                 # Xóa file Video
@@ -408,11 +413,12 @@ class BRollTab:
                     try: os.remove(thumb_path)
                     except: pass
                 
-                # Xóa khỏi database
-                if vid_name in p_data.get(dict_key, {}):
-                    del p_data[dict_key][vid_name]
+                # Bắn lệnh SQL xóa vĩnh viễn khỏi Database
+                cursor.execute("DELETE FROM brolls WHERE project_id = ? AND file_name = ?", (db_proj_id, vid_name))
             
-            self.main_app.save_project_data(self.current_project_id, p_data)
+            conn.commit()
+            conn.close()
+            
             messagebox.showinfo("Thành công", f"Đã tiễn {len(selected_vids)} file về cát bụi!")
             self.render_video_list()
 
@@ -1296,11 +1302,17 @@ class BRollTab:
         
         if os.path.exists(src): shutil.move(src, dst)
         
-        p_data = self.main_app.get_project_data(self.current_project_id)
-        if "trash" not in p_data: p_data["trash"] = {}
-        if vid_name in p_data.get("videos", {}):
-            p_data["trash"][vid_name] = p_data["videos"].pop(vid_name)
-            self.main_app.save_project_data(self.current_project_id, p_data)
+        # --- [BẢN ĐỘ MỚI] Cập nhật Database ---
+        import database
+        conn = database.get_connection()
+        cursor = conn.cursor()
+        proj_name = self.main_app.projects[self.current_project_id]['name']
+        cursor.execute("SELECT id FROM projects WHERE name = ?", (proj_name,))
+        db_proj_id = cursor.fetchone()['id']
+        
+        cursor.execute("UPDATE brolls SET status = 'trash' WHERE project_id = ? AND file_name = ?", (db_proj_id, vid_name))
+        conn.commit()
+        conn.close()
         
         if refresh:
             self.render_video_list()
@@ -1314,11 +1326,18 @@ class BRollTab:
         
         if os.path.exists(src): shutil.move(src, dst)
         
-        p_data = self.main_app.get_project_data(self.current_project_id)
-        if "videos" not in p_data: p_data["videos"] = {}
-        if vid_name in p_data.get("trash", {}):
-            p_data["videos"][vid_name] = p_data["trash"].pop(vid_name)
-            self.main_app.save_project_data(self.current_project_id, p_data)
+        # --- [BẢN ĐỘ MỚI] Cập nhật Database ---
+        import database
+        conn = database.get_connection()
+        cursor = conn.cursor()
+        proj_name = self.main_app.projects[self.current_project_id]['name']
+        cursor.execute("SELECT id FROM projects WHERE name = ?", (proj_name,))
+        db_proj_id = cursor.fetchone()['id']
+        
+        cursor.execute("UPDATE brolls SET status = 'active' WHERE project_id = ? AND file_name = ?", (db_proj_id, vid_name))
+        conn.commit()
+        conn.close()
+        
         self.render_video_list()
 
     def open_file_location(self, vid_name):

@@ -11,7 +11,6 @@ import cv2
 from paths import BASE_PATH
 from shopee_export import (
     claim_next_shopee_job,
-    get_shopee_csv_path,
     get_video_output_dir,
     load_shopee_jobs,
     normalize_shopee_product_link,
@@ -32,31 +31,13 @@ class LimitReachedError(Exception):
 
 class AutoPostTab:
     REQUIRED_IMAGE_FILES = [
-        "tab_live.png",
-        "icon_canhan.png",
-        "nut_dang_video.png",
-        "chu_thu_vien.png",
-        "nut_tiep_theo.png",
-        "nut_tiep_theo_2.png",
-        "o_nhap_mota.png",
-        "nut_dong_y.png",
-        "nut_them_san_pham.png",
-        "icon_link.png",
-        "only_link.png",
-        "nut_xoa_tat_ca.png",
-        "nut_nhap.png",
-        "chon_tat_ca.png",
-        "nut_them_sp_cuoi.png",
-        "nut_dang_cuoi.png",
+        "tab_live.png", "icon_canhan.png", "nut_dang_video.png", "chu_thu_vien.png",
+        "nut_tiep_theo.png", "nut_tiep_theo_2.png", "o_nhap_mota.png", "nut_dong_y.png",
+        "nut_them_san_pham.png", "icon_link.png", "only_link.png", "nut_xoa_tat_ca.png",
+        "nut_nhap.png", "chon_tat_ca.png", "nut_them_sp_cuoi.png", "nut_dang_cuoi.png",
     ]
     REMOTE_VIDEO_EXTENSIONS = ("mp4", "mov", "avi", "mkv", "3gp", "webm", "m4v")
-    REMOTE_VIDEO_DIRS = (
-        "/sdcard/DCIM/Camera",
-        "/sdcard/DCIM",
-        "/sdcard/Movies",
-        "/sdcard/Download",
-        "/sdcard/Pictures",
-    )
+    REMOTE_VIDEO_DIRS = ("/sdcard/DCIM/Camera", "/sdcard/DCIM", "/sdcard/Movies", "/sdcard/Download", "/sdcard/Pictures")
 
     def __init__(self, parent_frame, main_app):
         self.parent = parent_frame
@@ -67,9 +48,6 @@ class AutoPostTab:
         self.is_paused = False
         self.active_workers = 0
         self.active_workers_lock = threading.Lock()
-        self.job_retry_counts = {}
-        self.job_retry_lock = threading.Lock()
-        self.runtime_csv_path = ""
 
         self.var_stagger = tk.IntVar(value=int(self.main_app.config.get("auto_post_stagger", 15)))
         self.var_click_delay = tk.DoubleVar(value=float(self.main_app.config.get("auto_post_click_delay", 1.0)))
@@ -83,10 +61,9 @@ class AutoPostTab:
         self.refresh_jobs_preview()
 
     def setup_ui(self):
-        # ================= 1. BANNER =================
         top_frame = tk.Frame(self.parent, bg="#e8f4f8", pady=15, padx=20, bd=1, relief="solid")
         top_frame.pack(fill="x", side="top", pady=10, padx=20)
-        tk.Label(top_frame, text="🚜 TRUNG TÂM KIỂM SOÁT AUTO ĐĂNG SHOPEE", bg="#e8f4f8", font=("Arial", 16, "bold"), fg="#d9534f").pack(side="left", padx=10)
+        tk.Label(top_frame, text="🚜 TRUNG TÂM KIỂM SOÁT AUTO ĐĂNG SHOPEE (DATABASE)", bg="#e8f4f8", font=("Arial", 16, "bold"), fg="#d9534f").pack(side="left", padx=10)
 
         self.btn_stop = tk.Button(top_frame, text="⏹ DỪNG HẲN", bg="#d9534f", fg="white", font=("Arial", 12, "bold"), command=self.stop_auto_post, state="disabled", width=15)
         self.btn_stop.pack(side="right", padx=10)
@@ -95,10 +72,9 @@ class AutoPostTab:
         self.btn_auto = tk.Button(top_frame, text="▶ BẮT ĐẦU AUTO ĐĂNG", bg="#28a745", fg="white", font=("Arial", 12, "bold"), command=self.start_auto_post, width=20)
         self.btn_auto.pack(side="right", padx=10)
 
-        self.manage_status = tk.Label(self.parent, text="🖱️ Nếu có ảnh mẫu trong thư mục Phone_image, tool sẽ ưu tiên bấm bằng ảnh; nếu thiếu thì dùng tọa độ fallback.", fg="#337ab7", font=("Arial", 11, "italic", "bold"), bg="#f8f9fa")
+        self.manage_status = tk.Label(self.parent, text="🖱️ Hệ thống đã kết nối trực tiếp với Database. Xử lý đa luồng siêu tốc!", fg="#337ab7", font=("Arial", 11, "italic", "bold"), bg="#f8f9fa")
         self.manage_status.pack(pady=5)
 
-        # PHỤC HỒI LẠI PANEDWINDOW CHIA 2 CỘT
         content = tk.PanedWindow(self.parent, orient=tk.HORIZONTAL, sashwidth=6, bg="#f8f9fa")
         content.pack(fill="both", expand=True, padx=20, pady=(0, 20))
 
@@ -107,7 +83,7 @@ class AutoPostTab:
         content.add(left_panel, minsize=520)
         content.add(right_panel, minsize=520)
 
-        # ================= CỘT TRÁI =================
+        # === CỘT TRÁI ===
         settings_frame = tk.LabelFrame(left_panel, text=" ⚙️ Cấu hình Farm ", bg="#ffffff", font=("Arial", 11, "bold"), padx=15, pady=10)
         settings_frame.pack(fill="x", pady=(0, 10))
 
@@ -121,26 +97,20 @@ class AutoPostTab:
         path_frame = tk.LabelFrame(left_panel, text=" 📁 Nguồn dữ liệu ", bg="#ffffff", font=("Arial", 11, "bold"), padx=15, pady=10)
         path_frame.pack(fill="x", pady=(0, 10))
 
-        tk.Label(path_frame, text="File job Shopee CSV:", bg="#ffffff", font=("Arial", 10, "bold")).pack(anchor="w")
-        self.lbl_csv_path = tk.Label(path_frame, text=self.get_current_csv_path(), bg="#ffffff", justify="left", fg="#2c3e50", wraplength=520)
-        self.lbl_csv_path.pack(anchor="w", pady=(2, 8))
-
         btn_path = tk.Frame(path_frame, bg="#ffffff")
         btn_path.pack(fill="x")
-        tk.Button(btn_path, text="📌 Chọn CSV", bg="#8e44ad", fg="white", font=("Arial", 9, "bold"), command=self.pick_shopee_csv).pack(side="left", padx=(0, 8))
-        tk.Button(btn_path, text="📑 Mở CSV", bg="#3498db", fg="white", font=("Arial", 9, "bold"), command=self.open_shopee_csv).pack(side="left", padx=(0, 8))
         tk.Button(btn_path, text="📂 Mở kho video", bg="#16a085", fg="white", font=("Arial", 9, "bold"), command=self.open_video_folder).pack(side="left", padx=(0, 8))
         tk.Button(btn_path, text="🖼️ Mở thư mục ảnh", bg="#e67e22", fg="white", font=("Arial", 9, "bold"), command=self.open_image_folder).pack(side="left")
 
         cv_frame = tk.LabelFrame(left_panel, text=" 🖼️ Trung tâm ảnh mắt thần OpenCV ", bg="#ffffff", font=("Arial", 11, "bold"), fg="#e67e22", padx=15, pady=10)
         cv_frame.pack(fill="both", expand=True)
 
-        tk.Label(cv_frame, text="Hệ thống tự động nhận diện ảnh trong thư mục Phone_image. Bác chỉ cần cắt ảnh đúng nút và thả vào thư mục này.", bg="#ffffff", fg="#337ab7", font=("Arial", 10, "bold"), justify="left", wraplength=520).pack(anchor="w", pady=(0, 10))
+        tk.Label(cv_frame, text="Hệ thống tự động nhận diện ảnh trong thư mục Phone_image.", bg="#ffffff", fg="#337ab7", font=("Arial", 10, "bold"), justify="left", wraplength=520).pack(anchor="w", pady=(0, 10))
 
         files_req = "\n".join(f"{idx + 1}. {name}" for idx, name in enumerate(self.REQUIRED_IMAGE_FILES))
         tk.Label(cv_frame, text=f"📌 Danh sách ảnh nên có:\n{files_req}", bg="#f9f9f9", fg="#d35400", font=("Courier New", 9, "bold"), justify="left", anchor="w", padx=10, pady=10).pack(fill="x")
 
-        # ================= CỘT PHẢI (BẢNG QUẢN LÝ JOB) =================
+        # === CỘT PHẢI ===
         info_frame = tk.LabelFrame(right_panel, text=" 📋 Danh sách job Shopee ", bg="#ffffff", font=("Arial", 11, "bold"), padx=15, pady=10)
         info_frame.pack(fill="both", expand=True, pady=(0, 10))
 
@@ -152,7 +122,7 @@ class AutoPostTab:
 
         cols = ("stt", "video", "product", "status", "action")
         self.tree_jobs = ttk.Treeview(info_frame, columns=cols, show="headings", height=16)
-        self.tree_jobs.heading("stt", text="STT")
+        self.tree_jobs.heading("stt", text="ID")
         self.tree_jobs.heading("video", text="Tên Video")
         self.tree_jobs.heading("product", text="Tên Sản Phẩm")
         self.tree_jobs.heading("status", text="Trạng thái")
@@ -169,7 +139,6 @@ class AutoPostTab:
         self.tree_jobs.tag_configure("error", foreground="#c0392b")
         self.tree_jobs.tag_configure("pending", foreground="#2c3e50")
 
-        # Sự kiện click để bắn video bằng tay
         self.tree_jobs.bind("<ButtonRelease-1>", self.on_tree_click)
 
         job_scroll = ttk.Scrollbar(info_frame, orient="vertical", command=self.tree_jobs.yview)
@@ -180,7 +149,7 @@ class AutoPostTab:
         guide_frame = tk.LabelFrame(right_panel, text=" Hướng dẫn vận hành ", bg="#ffffff", font=("Arial", 11, "bold"), fg="#8e44ad", padx=15, pady=10)
         guide_frame.pack(fill="x")
         instructions = (
-            "✅ BƯỚC 1: Render video ở tab Edit Video để sinh file job Shopee CSV.\n"
+            "✅ BƯỚC 1: Render video ở tab Edit Video để tự tạo Job vào Database.\n"
             "✅ BƯỚC 2: Sang tab Quản Lý Điện Thoại, tick chọn các box phone cần chạy.\n"
             "✅ BƯỚC 3: Kiểm tra thư mục Phone_image đã đủ ảnh mẫu.\n"
             "🚀 BƯỚC 4: Quay lại đây bấm [▶ BẮT ĐẦU AUTO ĐĂNG]."
@@ -210,22 +179,10 @@ class AutoPostTab:
         try:
             self.main_app.config[config_key] = variable.get()
             self.main_app.save_config()
-        except Exception:
-            pass
+        except Exception: pass
 
     def on_tab_activated(self):
-        self._refresh_csv_path_label()
         self.refresh_jobs_preview()
-
-    def get_current_csv_path(self):
-        return get_shopee_csv_path(self.main_app.config)
-
-    def get_active_csv_path(self):
-        return self.runtime_csv_path or self.get_current_csv_path()
-
-    def _refresh_csv_path_label(self):
-        if hasattr(self, "lbl_csv_path") and self.lbl_csv_path.winfo_exists():
-            self.lbl_csv_path.config(text=self.get_current_csv_path())
 
     def get_phone_image_dir(self):
         folder = os.path.join(BASE_PATH, "Phone_image")
@@ -236,60 +193,28 @@ class AutoPostTab:
         folder = self.get_phone_image_dir()
         if os.name == "nt": os.startfile(folder)
 
-    def pick_shopee_csv(self):
-        if self.is_farming:
-            return messagebox.showwarning("Đang chạy", "Không đổi file CSV khi hệ thống đang chạy.")
-
-        initial_path = self.get_current_csv_path()
-        selected_path = filedialog.asksaveasfilename(
-            title="Chọn file CSV job Shopee",
-            defaultextension=".csv",
-            filetypes=[("CSV files", "*.csv")],
-            initialdir=os.path.dirname(initial_path) if os.path.dirname(initial_path) else BASE_PATH,
-            initialfile=os.path.basename(initial_path),
-        )
-        if not selected_path: return
-
-        active_profile = self.main_app.get_active_profile_name() if hasattr(self.main_app, "get_active_profile_name") else "Default"
-        profile_csv_paths = self.main_app.config.setdefault("shopee_csv_paths", {})
-        profile_csv_paths[active_profile] = selected_path
-        self.main_app.config["shopee_csv_path"] = selected_path
-        self.main_app.save_config()
-        self._refresh_csv_path_label()
-        self.refresh_jobs_preview()
-
-    def open_shopee_csv(self):
-        csv_path = self.get_current_csv_path()
-        if os.path.exists(csv_path): os.startfile(csv_path)
-        else: messagebox.showwarning("Thiếu file", "Chưa có file CSV job Shopee. Bác render video trước đã.")
-
     def open_video_folder(self):
         video_output_dir = get_video_output_dir()
         os.makedirs(video_output_dir, exist_ok=True)
         if os.name == "nt": os.startfile(video_output_dir)
 
     def refresh_jobs_preview(self):
-        self._refresh_csv_path_label()
         for item in self.tree_jobs.get_children():
             self.tree_jobs.delete(item)
 
-        jobs = load_shopee_jobs(csv_path=self.get_active_csv_path())
+        jobs = load_shopee_jobs()
         pending_count, processing_count, done_count = 0, 0, 0
 
         for job in jobs:
             status = job.get("status", "")
-            if "Đã đăng" in status:
-                tag = "done"; done_count += 1
-            elif "Đang xử" in status:
-                tag = "processing"; processing_count += 1
-            elif "Lỗi" in status:
-                tag = "error"
-            else:
-                tag = "pending"; pending_count += 1
+            if "Đã đăng" in status: tag = "done"; done_count += 1
+            elif "Đang xử" in status: tag = "processing"; processing_count += 1
+            elif "Lỗi" in status: tag = "error"
+            else: tag = "pending"; pending_count += 1
 
             self.tree_jobs.insert("", "end", values=(job.get("stt", ""), job.get("video_name", ""), job.get("product_name", ""), status, "[ 📤 Bắn Video ]"), tags=(tag,))
 
-        if not jobs: self.lbl_job_summary.config(text="Chưa có job nào trong file CSV Shopee.", fg="#c0392b")
+        if not jobs: self.lbl_job_summary.config(text="Database trống. Chưa có job Shopee nào.", fg="#c0392b")
         else: self.lbl_job_summary.config(text=f"Tổng {len(jobs)} job | Chờ đăng: {pending_count} | Đang xử: {processing_count} | Đã đăng: {done_count}", fg="#8e44ad")
 
     def show_status_temp(self, msg, color="green", duration=3500):
@@ -324,13 +249,12 @@ class AutoPostTab:
     def start_auto_post(self):
         if u2 is None: return messagebox.showerror("Thiếu thư viện", "Chưa cài uiautomator2.")
 
-        csv_path = self.get_current_csv_path()
-        if not os.path.exists(csv_path): return messagebox.showerror("Thiếu file", "Không tìm thấy file CSV.")
+        jobs = load_shopee_jobs()
+        if not jobs: return messagebox.showerror("Trống", "Database chưa có video nào. Hãy xuất video trước.")
 
         selected_devices = self.main_app.tab5.get_selected_devices() if hasattr(self.main_app, "tab5") else []
         if not selected_devices: return messagebox.showwarning("Chưa chọn máy", "Bác chưa tick máy nào ở tab Quản Lý Điện Thoại.")
 
-        self.runtime_csv_path = csv_path
         self.is_farming = True
         self.is_paused = False
         self.btn_auto.config(state="disabled", text="🚜 ĐANG CHẠY AUTO")
@@ -351,11 +275,10 @@ class AutoPostTab:
         creationflags = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
         remote_dir = "/sdcard/DCIM/Camera/"
         current_job = None
-        job_csv_path = self.get_active_csv_path()
 
         def upd_status(msg): self.parent.after(0, lambda: self.main_app.tab5.update_device_farm_status(device_id, msg))
         def update_job_status(video_name, status):
-            update_shopee_status(video_name, status, csv_path=job_csv_path)
+            update_shopee_status(video_name, status)
             self.parent.after(0, self.refresh_jobs_preview)
 
         try:
@@ -381,12 +304,11 @@ class AutoPostTab:
                     time.sleep(1)
                 if not self.is_farming: break
 
-                upd_status("🔎 Đang nhận job từ CSV...")
-                current_job = claim_next_shopee_job(device_id[-4:], csv_path=job_csv_path)
+                upd_status("🔎 Đang bốc job từ Database...")
+                current_job = claim_next_shopee_job(device_id[-4:])
                 self.parent.after(0, self.refresh_jobs_preview)
                 if not current_job:
                     upd_status("🎉 Hoàn thành! (Hết job) -> Về màn hình chính")
-                    # Bắn lệnh giả lập bấm phím Home
                     subprocess.run([adb_cmd, "-s", device_id, "shell", "input", "keyevent", "3"], creationflags=creationflags)
                     break
 
@@ -394,7 +316,6 @@ class AutoPostTab:
                 caption_text = current_job.get("caption", "")
                 link_text = normalize_shopee_product_link(current_job.get("link", ""))
                 
-                # CHỐNG MẤT FILE - TÌM TRONG FOLDER DA_DANG
                 video_path = resolve_shopee_video_path(video_name)
                 if not os.path.exists(video_path):
                     vid_path_da_dang = os.path.join(get_video_output_dir(), "DA_DANG", video_name)
@@ -443,7 +364,6 @@ class AutoPostTab:
                     upd_status("🛑 Máy đã chạm giới hạn. Thoát về Home...")
                     self._cleanup_remote_file(adb_cmd, device_id, remote_video_path, creationflags)
                     current_job = None
-                    # Bắn lệnh giả lập bấm phím Home
                     subprocess.run([adb_cmd, "-s", device_id, "shell", "input", "keyevent", "3"], creationflags=creationflags)
                     break
                 except Exception as exc:
@@ -462,7 +382,6 @@ class AutoPostTab:
                     if not self.is_farming: break
                     time.sleep(1)
 
-                # ================= HOÀN THÀNH JOB =================
                 update_job_status(video_name, "Đã đăng ✅")
                 upd_status("✅ Đăng xong, dọn dẹp file rác.")
                 self._cleanup_remote_file(adb_cmd, device_id, remote_video_path, creationflags)
@@ -472,7 +391,6 @@ class AutoPostTab:
                     self.main_app.config["posted_today"] = self.main_app.posted_today
                     self.main_app.save_config()
                 
-                # CHUYỂN FILE SANG DA_DANG ĐỂ CHỐNG SPAM Ổ CỨNG
                 da_dang_folder = os.path.join(get_video_output_dir(), "DA_DANG")
                 os.makedirs(da_dang_folder, exist_ok=True)
                 try: shutil.move(video_path, os.path.join(da_dang_folder, video_name))
@@ -581,7 +499,6 @@ class AutoPostTab:
         try:
             device.set_fastinput_ime(True)
             device.send_keys(caption_text)
-            # XÓA lệnh tắt bàn phím ở đây
         except: pass
         time.sleep(2)
 
@@ -592,7 +509,6 @@ class AutoPostTab:
         except: adb_tap(int(w * 0.90), int(h * 0.07))
         time.sleep(2)
 
-        # ================= TÌM VÀ DÁN TOÀN BỘ LINK CÙNG LÚC =================
         upd_status("🔍 Đang tìm nút Thêm sản phẩm...")
         try:
             w, h = device.window_size()
@@ -621,11 +537,10 @@ class AutoPostTab:
         except: pass
         time.sleep(2)
 
-        upd_status("🔗 Đang dán TOÀN BỘ Link từ Excel...")
+        upd_status("🔗 Đang dán TOÀN BỘ Link từ Database...")
         try:
             device.set_fastinput_ime(True)
             device.send_keys(link_text)
-            # XÓA lệnh tắt bàn phím ở đây
         except: pass
         time.sleep(2)
 
@@ -740,22 +655,14 @@ class AutoPostTab:
 
     def _cleanup_remote_file(self, adb_cmd, device_id, remote_path, creationflags):
         try:
-            # 1. Xóa chính xác cái file vừa đăng
             subprocess.run([adb_cmd, "-s", device_id, "shell", "rm", "-f", f'"{remote_path}"'], creationflags=creationflags, check=False)
-            
-            # 2. LỆNH HỦY DIỆT: Quét sạch sành sanh mọi video rác tồn đọng trong máy
             remote_dir = "/sdcard/DCIM/Camera/"
             subprocess.run([adb_cmd, "-s", device_id, "shell", "rm", "-f", f'{remote_dir}*.mp4'], creationflags=creationflags, check=False)
             subprocess.run([adb_cmd, "-s", device_id, "shell", "rm", "-f", f'{remote_dir}*.MOV'], creationflags=creationflags, check=False)
-            
-            # 3. Ép điện thoại F5 lại Thư viện ảnh để Shopee không bị lưu bộ nhớ đệm
             self._broadcast_media_scan(adb_cmd, device_id, remote_path, creationflags)
             self._broadcast_media_scan(adb_cmd, device_id, remote_dir, creationflags)
         except: pass
 
-    # =========================================================
-    # HÀM BẮN VIDEO THỦ CÔNG (TÍCH HỢP TRỰC TIẾP VÀO BẢNG)
-    # =========================================================
     def on_tree_click(self, event):
         if self.is_farming: return 
         region = self.tree_jobs.identify("region", event.x, event.y)
