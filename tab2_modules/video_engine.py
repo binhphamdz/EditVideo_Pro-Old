@@ -1,7 +1,6 @@
 import os
 import random
 import subprocess
-import csv
 import json
 import shutil
 import threading # [MỚI] IMPORT THƯ VIỆN KHÓA
@@ -177,7 +176,7 @@ def get_vid_info(file_path):
         return 5.0, False
 
 # [BẢN ĐỘ MỚI] Gọt bớt tham số thừa, chỉ giữ những gì cần thiết
-def render_faceless_video(voice_name, voice_path, timeline, proj_dir, proj_name, config, out_file, out_dir, logger, broll_data=None):
+def render_faceless_video(voice_name, voice_path, timeline, proj_dir, proj_name, config, out_file, out_dir, log_cb, broll_data=None):
     # [BẢN ĐỘ MỚI] Tạo túi đựng các cảnh trám đã được sử dụng thực tế
     used_brolls = []
     speed_val = config.get("video_speed", 1.0)
@@ -599,16 +598,16 @@ def render_faceless_video(voice_name, voice_path, timeline, proj_dir, proj_name,
             try: os.remove(f_path)
             except: pass
 
-    with csv_write_lock:
-        with open(excel_log_file, 'a', encoding='utf-8-sig', newline='') as f:
-            csv.writer(f).writerow([datetime.now().strftime('%d/%m/%Y %H:%M'), proj_name, voice_name, out_file, "Chưa chuyển"])
+    # ĐOẠN NÀY ĐÃ XÓA SẠCH CODE GHI CSV (EXCEL) CŨ VÌ ĐÃ CÓ DATABASE
 
     shopee_out_of_stock = is_shopee_out_of_stock_project(proj_dir)
-    exported_to_shopee, shopee_export_path = export_rendered_video_to_shopee_files(proj_dir, out_file, config=config, default_status="Chưa chuyển")
+    # Ghi thẳng vào bảng shopee_jobs trong Database
+    exported_to_shopee, _ = export_rendered_video_to_shopee_files(proj_dir, out_file, config=config, default_status="Chưa đăng")
+    
     if shopee_out_of_stock:
-        log_cb(f"[{voice_name}] ⏭️ Shopee đang để Hết hàng, bỏ qua ghi file job đăng.")
+        log_cb(f"[{voice_name}] ⏭️ Shopee đang để Hết hàng, bỏ qua lưu Job.")
     elif exported_to_shopee:
-        log_cb(f"[{voice_name}] ✅ Đã ghi dữ liệu Shopee vào: {shopee_export_path}")
+        log_cb(f"[{voice_name}] ✅ Đã lưu Job đăng Shopee vào Database thành công!")
         
-    # [BẢN ĐỘ MỚI] Trả về danh sách CHÍNH XÁC những video Broll đã bị FFmpeg nhét vào lò
+    # Trả về danh sách CHÍNH XÁC những video Broll đã bị FFmpeg nhét vào lò
     return list(global_used_vids)
