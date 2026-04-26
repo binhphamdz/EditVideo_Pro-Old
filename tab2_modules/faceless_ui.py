@@ -328,29 +328,53 @@ class FacelessTab:
         if not all_voices: 
             return bot.send_message(chat_id, "❌ Kho Voice trống trơn! Sếp nạp thêm đạn vào đi.")
 
-        # --- [BẢN ĐỘ MỚI] Lấy sổ nợ từ Database ---
+        # --- [COOLDOWN] Bốc Voice thông minh: ưu tiên voice chưa dùng trong 3 ngày ---
         with database.db_lock:
             conn = database.get_connection()
             cursor = conn.cursor()
             cursor.execute("SELECT id FROM projects WHERE name = ?", (proj_name,))
-            db_proj_id = cursor.fetchone()['id']
-            
-            cursor.execute("SELECT file_name, usage_count FROM voices WHERE project_id = ?", (db_proj_id,))
-            voice_usage = {r['file_name']: r['usage_count'] for r in cursor.fetchall()}
+            row = cursor.fetchone()
+            if not row:
+                conn.close()
+                return bot.send_message(chat_id, "❌ Không tìm thấy Project trong Database!")
+            db_proj_id = row['id']
+
+            # Lấy voice đã nạp vào DB, loại trừ những voice dùng trong 3 ngày gần nhất
+            cursor.execute('''
+                SELECT file_name FROM voices
+                WHERE project_id = ?
+                  AND (last_used IS NULL OR last_used < datetime('now', '-3 days', 'localtime'))
+                ORDER BY usage_count ASC, last_used ASC
+            ''', (db_proj_id,))
+            cooldown_rows = cursor.fetchall()
+
+            # FALLBACK: Nếu toàn bộ voice đang trong cooldown → bốc cái lâu nhất chưa dùng
+            if not cooldown_rows:
+                cursor.execute('''
+                    SELECT file_name FROM voices
+                    WHERE project_id = ?
+                    ORDER BY last_used ASC
+                ''', (db_proj_id,))
+                cooldown_rows = cursor.fetchall()
+
             conn.close()
 
-        random.shuffle(all_voices)
-        
-        def get_usage_for_bot(v_name):
-            for k, v in voice_usage.items():
-                if k.lower() == v_name.lower(): return int(v)
-            return 0
-            
-        all_voices.sort(key=get_usage_for_bot)
-        all_voices = all_voices[:3] 
+        # Chỉ lấy những file thực sự tồn tại trên ổ cứng
+        db_voice_names = [r['file_name'] for r in cooldown_rows]
+        all_voices = [v for v in db_voice_names if os.path.exists(os.path.join(voice_dir, v))]
 
-        self.main_app.config["app_base_path"] = BASE_PATH 
-        bot.send_message(chat_id, f"🎬 ĐẠO DIỄN AI NHẬN LỆNH!\n📁 Project: {proj_name}\n🎙️ Đã lọc ra {len(all_voices)} video. Đang đưa vào lò xào nấu...")
+        # Nếu DB chưa có voice nào (project mới chưa migrate) → fallback lấy file trực tiếp
+        if not all_voices:
+            all_voices = [f for f in os.listdir(voice_dir) if f.lower().endswith(('.mp3', '.wav', '.m4a'))]
+            all_voices = all_voices[:3]
+        else:
+            all_voices = all_voices[:3]
+
+        if not all_voices:
+            return bot.send_message(chat_id, "❌ Kho Voice trống trơn! Sếp nạp thêm đạn vào đi.")
+
+        self.main_app.config["app_base_path"] = BASE_PATH
+        bot.send_message(chat_id, f"🎬 ĐẠO DIỄN AI NHẬN LỆNH!\n📁 Project: {proj_name}\n🎙️ Đã lọc ra {len(all_voices)} voice (tránh trùng 3 ngày). Đang đưa vào lò xào nấu...")
         threading.Thread(target=self._run_multithread_batch, args=(all_voices, proj_dir, proj_name, bot, chat_id), daemon=True).start()
 
     def start_batch_process(self):
@@ -527,8 +551,13 @@ class FacelessTab:
                 with database.db_lock:
                     conn = database.get_connection()
                     cursor = conn.cursor()
-                    # Cộng 1 lượt dùng cho file Voice
-                    cursor.execute("UPDATE voices SET usage_count = usage_count + 1 WHERE project_id = ? AND file_name = ?", (db_proj_id, voice_name))
+                    # Cộng 1 lượt dùng cho file Voice + ghi dấu thời gian dùng (cooldown 3 ngày)
+                    cursor.execute("""
+                        UPDATE voices 
+                        SET usage_count = usage_count + 1,
+                            last_used = datetime('now', 'localtime')
+                        WHERE project_id = ? AND file_name = ?
+                    """, (db_proj_id, voice_name))
                     
                     # Cộng 1 lượt dùng cho từng cảnh trám thực tế đã xuất hiện trong video
                     if actual_used_brolls:

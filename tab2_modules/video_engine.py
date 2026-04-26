@@ -175,11 +175,11 @@ def get_vid_info(file_path):
     except:
         return 5.0, False
 
-# [BẢN ĐỘ MỚI] Gọt bớt tham số thừa, chỉ giữ những gì cần thiết
+# [BẢN ĐỘ MỚI - FIX LỖI HỤT VIDEO] 
 def render_faceless_video(voice_name, voice_path, timeline, proj_dir, proj_name, config, out_file, out_dir, log_cb, broll_data=None):
-    # [BẢN ĐỘ MỚI] Tạo túi đựng các cảnh trám đã được sử dụng thực tế
     used_brolls = []
-    speed_val = config.get("video_speed", 1.0)
+    
+    # ❌ ĐÃ BỎ speed_val vì nó là thủ phạm làm video bị ngắn hơn Voice
     auto_speed_max = config.get("auto_speed_max", 1.4)
     bright_val = config.get("video_bright", 1.0)
     use_trans = config.get("use_trans", True)
@@ -188,19 +188,16 @@ def render_faceless_video(voice_name, voice_path, timeline, proj_dir, proj_name,
     custom_font = config.get("font_path", "")
     whoosh_sfx_path = _resolve_media_asset("whoosh.mp3", "whoosh.MP3")
     
-    trans_dur = config.get("trans_duration", 0.5)  # [MỚI] Lấy từ config, mặc định 0.5s
-    log_cb(f"[{voice_name}] Đang phân tích Timeline & Gắn hiệu ứng (FFmpeg Đa nhân)...")
+    trans_dur = config.get("trans_duration", 0.5)
+    log_cb(f"[{voice_name}] Đang phân tích Timeline & Gắn hiệu ứng (Fix lỗi hụt video)...")
     
     voice_dur, _ = get_vid_info(voice_path)
     
     all_brolls = [f for f in os.listdir(os.path.join(proj_dir, "Broll")) if f.lower().endswith(('.mp4', '.mov'))]
     if not all_brolls: raise Exception("Không tìm thấy video Broll nào trong project!")
 
-    # =======================================================
-    # [BÙA CHỐNG KẸT FFMPEG 1] - XỬ LÝ TIMELINE RỖNG
-    # =======================================================
     if not timeline:
-        log_cb(f"[{voice_name}] ⚠️ Timeline AI rỗng! Tự động bật chế độ lấp đầy toàn dải...")
+        log_cb(f"[{voice_name}] ⚠️ Timeline AI rỗng! Tự động lấp đầy toàn dải...")
         timeline = [{"video_file": "", "start": 0, "end": voice_dur}]
 
     global_used_vids = set()
@@ -209,9 +206,6 @@ def render_faceless_video(voice_name, voice_path, timeline, proj_dir, proj_name,
     selected_clips = []
     current_time = 0.0
 
-    # =======================================================
-    # BƯỚC 1: TÍNH TOÁN BROLL CẦN THIẾT
-    # =======================================================
     for i, row in enumerate(timeline):
         end_time = float(row.get("end", 0))
         if i == len(timeline) - 1: end_time = max(end_time, voice_dur)
@@ -225,31 +219,22 @@ def render_faceless_video(voice_name, voice_path, timeline, proj_dir, proj_name,
         fail_safe = 0
         scene_vids = []
         
-        # Lấy MẢNG video do AI Đạo Diễn xếp sẵn
         ai_chosen_videos = row.get("video_files", [])
-        if isinstance(ai_chosen_videos, str): ai_chosen_videos = [ai_chosen_videos] # Bọc lót nếu json cũ
+        if isinstance(ai_chosen_videos, str): ai_chosen_videos = [ai_chosen_videos] 
         
-        # Biến mảng này thành một hàng đợi (Queue), kiểm tra xem file có thật trên ổ cứng không
         ai_queue = [v for v in ai_chosen_videos if os.path.exists(os.path.join(proj_dir, "Broll", v))]
 
         while current_dur < actual_req_dur and fail_safe < 200:
-            
-            # ƯU TIÊN 1: Rút video từ kịch bản của AI ra dùng trước
             if ai_queue:
                 v_n = ai_queue.pop(0)
             else:
-                # ƯU TIÊN 2: Nếu AI xếp kịch bản vẫn bị hụt giây, Cực chẳng đã mới phải Random lấp vào
                 available = [f for f in all_brolls if f not in global_used_vids]
                 if not available: 
                     global_used_vids.clear()
                     available = all_brolls
                 if len(available) > 1 and last_vid_name in available: available.remove(last_vid_name)
                 
-                # --- [BẢN ĐỘ MỚI] ÉP FFMPEG LẤY VIDEO ÍT DÙNG NHẤT ---
-                # Sắp xếp available dựa trên usage_count từ thấp đến cao
                 available.sort(key=lambda v: broll_data.get(v, {}).get('usage_count', 0))
-                
-                # Bốc ngẫu nhiên 1 trong 3 video ít dùng nhất để đổi vị, không bị 1 màu
                 top_candidates = available[:3] 
                 v_n = random.choice(top_candidates)
             
@@ -293,23 +278,17 @@ def render_faceless_video(voice_name, voice_path, timeline, proj_dir, proj_name,
             fail_safe += 1
 
         if scene_vids:
-            # Dùng thời lượng thực tế sau speed để không bị lệch mốc thời gian giữa scene.
+            # ✅ FIX 1: Tính chuẩn thời gian thực tế, không dùng speed_val gây hụt time
             scene_real_dur = sum(
-                clip['trim'] / max(clip['speed'] * speed_val, 0.01)
+                clip['trim'] / max(clip['speed'], 0.01)
                 for clip in scene_vids
             )
             selected_clips.append({'vids': scene_vids, 'dur': scene_real_dur})
         current_time = end_time
 
-    # =======================================================
-    # [BÙA CHỐNG KẸT FFMPEG 2] - KIỂM TRA TỔNG QUAN
-    # =======================================================
     if not selected_clips:
-        raise Exception("❌ File Voice quá ngắn hoặc thuật toán không gắp được cảnh nào. Đã tự động hủy để bảo vệ FFmpeg!")
+        raise Exception("❌ File Voice quá ngắn hoặc thuật toán không gắp được cảnh nào.")
 
-    # =======================================================
-    # BƯỚC 2: VIẾT KỊCH BẢN FFMPEG (HÌNH ẢNH + TRỘN ÂM THANH)
-    # =======================================================
     log_cb(f"[{voice_name}] Đang căn chỉnh ma trận Audio & Hình ảnh...")
     inputs = []
     v_filters = []
@@ -339,7 +318,9 @@ def render_faceless_video(voice_name, voice_path, timeline, proj_dir, proj_name,
             inputs.extend(['-i', clip['path']])
             
             end_t = clip['start_t'] + clip['trim']
-            pts_mod = 1.0 / (clip['speed'] * speed_val)
+            
+            # ✅ FIX 2: Bỏ speed_val để hình ảnh không chạy quá nhanh làm lòi đuôi Voice
+            pts_mod = 1.0 / clip['speed']
             
             flt_v = (
                 f"[{vid_input_idx}:v]trim={clip['start_t']:.3f}:{end_t:.3f},setpts={pts_mod}*(PTS-STARTPTS),"
@@ -352,7 +333,8 @@ def render_faceless_video(voice_name, voice_path, timeline, proj_dir, proj_name,
             
             keep_audio = broll_data.get(clip['name'], {}).get('keep_audio', False)
             if keep_audio and clip['has_audio'] and broll_vol > 0:
-                speed_factor = clip['speed'] * speed_val
+                # ✅ FIX 3: Đồng bộ audio phụ theo đúng tốc độ mới
+                speed_factor = clip['speed']
                 delay_ms = int(clip_time * 1000)
                 atempo_str = f"atempo={speed_factor}," if speed_factor != 1.0 else ""
                 
@@ -367,9 +349,6 @@ def render_faceless_video(voice_name, voice_path, timeline, proj_dir, proj_name,
             clip_time += clip['trim'] * pts_mod
             vid_input_idx += 1
 
-        # =======================================================
-        # [BÙA CHỐNG KẸT FFMPEG 3] - XỬ LÝ CONCAT SCENE
-        # =======================================================
         if len(scene_input_vids) > 1:
             raw_scene_label = f"[scenev_raw{i}]"
             scene_label = f"[scenev{i}]"
@@ -388,54 +367,32 @@ def render_faceless_video(voice_name, voice_path, timeline, proj_dir, proj_name,
     flt_fade = None
     xfade_fallback_flt = None
 
-    # =======================================================
-    # [BÙA CHỐNG KẸT FFMPEG 4] - XỬ LÝ CONCAT FINAL (Vào Lò)
-    # =======================================================
     if len(pre_labels) > 1 and use_trans:
         sc_dur = selected_clips[0]['dur']
         
-        # [BẢN ĐỘ MỚI] Bọc lót thời gian chuyển cảnh không được dài hơn video gốc
-        # Nếu trans_dur quá dài, tự động bóp nó lại bằng 1 nửa thời lượng video 1
         safe_trans_dur = min(trans_dur, sc_dur - 0.2) 
         if safe_trans_dur <= 0: safe_trans_dur = 0.2
         
         fade_offset = max(0.0, sc_dur - safe_trans_dur)
         label_fade = "[vfade0]"
         
-        # [MỚI] Ánh xạ UI transitions sang FFmpeg transitions
         trans_mapping = {
-            "fade": "fade",
-            "slide_left": "slideleft",
-            "slide_right": "slideright",
-            "slide_up": "slideup",
-            "slide_down": "slidedown",
-            "wipe_left": "wipeleft",
-            "wipe_right": "wiperight",
-            "hlslice": "hlslice",
-            "vsplit": "vsplit",
-            "zoom_in": "zoomin",
-            "zoom_out": "zoomout",
-            "diagonal": "diagonal",
-            "cross_fade": "fade",
+            "fade": "fade", "slide_left": "slideleft", "slide_right": "slideright",
+            "slide_up": "slideup", "slide_down": "slidedown", "wipe_left": "wipeleft",
+            "wipe_right": "wiperight", "hlslice": "hlslice", "vsplit": "vsplit",
+            "zoom_in": "zoomin", "zoom_out": "zoomout", "diagonal": "diagonal", "cross_fade": "fade",
         }
         
-        # Lấy transitions từ config
         selected_trans_keys = config.get("selected_transitions", ["fade"])
-        available_trans = [
-            trans_mapping[t]
-            for t in selected_trans_keys
-            if t in trans_mapping and trans_mapping[t] in SAFE_XFADE_TRANSITIONS
-        ]
-        
-        if not available_trans:
-            available_trans = ['fade']
+        available_trans = [trans_mapping[t] for t in selected_trans_keys if t in trans_mapping and trans_mapping[t] in SAFE_XFADE_TRANSITIONS]
+        if not available_trans: available_trans = ['fade']
         
         chosen_trans = random.choice(available_trans)
         if chosen_trans not in SAFE_XFADE_TRANSITIONS:
-            log_cb(f"[{voice_name}] ⚠️ Hiệu ứng '{chosen_trans}' chưa tương thích FFmpeg hiện tại. Tự đổi sang fade để tránh lỗi render.")
             chosen_trans = 'fade'
         
-        flt_fade = f"{pre_labels[0]}{pre_labels[1]}xfade=transition={chosen_trans}:duration={trans_dur}:offset={fade_offset},settb=AVTB,setpts=PTS-STARTPTS{label_fade}"
+        # ✅ FIX 4: Thay đổi 'duration={trans_dur}' thành 'duration={safe_trans_dur}' chống crash Xfade
+        flt_fade = f"{pre_labels[0]}{pre_labels[1]}xfade=transition={chosen_trans}:duration={safe_trans_dur}:offset={fade_offset},settb=AVTB,setpts=PTS-STARTPTS{label_fade}"
         xfade_fallback_flt = f"{pre_labels[0]}{pre_labels[1]}concat=n=2:v=1:a=0,settb=AVTB,setpts=PTS-STARTPTS{label_fade}"
         v_filters.append(flt_fade)
         
@@ -501,35 +458,24 @@ def render_faceless_video(voice_name, voice_path, timeline, proj_dir, proj_name,
 
     process = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore', creationflags=creation_flags)
     if process.returncode != 0 and chosen_trans and ("Not yet implemented in FFmpeg" in process.stderr or "Error applying option 'transition'" in process.stderr):
-        log_cb(f"[{voice_name}] ⚠️ FFmpeg không hỗ trợ hiệu ứng '{chosen_trans}'. Tự render lại bằng fade...")
         fallback_filter_complex = filter_complex.replace(f"transition={chosen_trans}", "transition=fade", 1)
-        with open(filter_script_path, 'w', encoding='utf-8') as f:
-            f.write(fallback_filter_complex)
+        with open(filter_script_path, 'w', encoding='utf-8') as f: f.write(fallback_filter_complex)
         process = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore', creationflags=creation_flags)
     if process.returncode != 0 and flt_fade and xfade_fallback_flt and ("Parsed_xfade" in process.stderr or "do not match" in process.stderr or "Failed to configure output pad" in process.stderr):
-        log_cb(f"[{voice_name}] ⚠️ Xfade bị lệch timebase. Tự render lại không dùng transition để tránh hỏng video...")
         fallback_filter_complex = filter_complex.replace(flt_fade, xfade_fallback_flt, 1)
-        with open(filter_script_path, 'w', encoding='utf-8') as f:
-            f.write(fallback_filter_complex)
+        with open(filter_script_path, 'w', encoding='utf-8') as f: f.write(fallback_filter_complex)
         process = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore', creationflags=creation_flags)
 
-    if process.returncode != 0: raise Exception(f"Lỗi FFmpeg Render Lõi: {process.stderr[-1500:]}")
+    if process.returncode != 0: raise Exception(f"Lỗi FFmpeg: {process.stderr[-1500:]}")
 
     safe_stem = os.path.splitext(voice_name)[0]
     temp_token = f"{safe_stem}_{int(time.time() * 1000)}_{threading.get_ident()}"
     temp_frame_jpg = os.path.join(out_dir, f"temp_frame_{temp_token}.jpg")
     temp_cover_png = os.path.join(out_dir, f"temp_cover_{temp_token}.png")
 
-    log_cb(f"[{voice_name}] Đang bốc ngẫu nhiên 1 frame toàn dải làm ảnh bìa...")
-    
-    # [BẢN ĐỘ MỚI] - BỐC RANDOM THẬT SỰ
     extract_points = []
     if voice_dur > 2.0:
-        # Lấy random 1 thời điểm từ giây thứ 1 đến sát cuối video (tránh frame đen đầu/cuối)
         random_sec = round(random.uniform(1.0, voice_dur - 1.0), 2)
-        
-        # Đưa thẳng điểm random lên đầu để FFmpeg trích xuất trước. 
-        # Nếu điểm random bị hỏng (hiếm khi), nó mới lấy điểm giữa hoặc điểm đầu làm backup.
         extract_points = [random_sec, round(voice_dur / 2, 2), 0.5] 
     else:
         extract_points = [0.0]
@@ -539,11 +485,7 @@ def render_faceless_video(voice_name, voice_path, timeline, proj_dir, proj_name,
     for point in extract_points:
         frame_result = subprocess.run(
         ['ffmpeg', '-y', '-ss', f"{point:.2f}", '-i', temp_main_mp4, '-frames:v', '1', temp_frame_jpg],
-            capture_output=True,
-            text=True,
-            encoding='utf-8',
-            errors='ignore',
-            creationflags=creation_flags,
+            capture_output=True, text=True, encoding='utf-8', errors='ignore', creationflags=creation_flags,
         )
         if frame_result.returncode == 0 and os.path.exists(temp_frame_jpg) and os.path.getsize(temp_frame_jpg) > 0:
             frame_ready = True
@@ -557,24 +499,8 @@ def render_faceless_video(voice_name, voice_path, timeline, proj_dir, proj_name,
                 draw = ImageDraw.Draw(img)
                 img_w, img_h = img.size
                 clean_proj_name = " ".join(proj_name.replace("_", " ").split()).upper()
-                display_text, font, stroke_w, line_spacing = _choose_cover_layout(
-                    draw,
-                    clean_proj_name,
-                    img_w,
-                    img_h,
-                    custom_font,
-                )
-                draw.multiline_text(
-                    (img_w / 2, img_h / 2),
-                    display_text,
-                    font=font,
-                    fill="white",
-                    align="center",
-                    anchor="mm",
-                    spacing=line_spacing,
-                    stroke_width=stroke_w,
-                    stroke_fill="black",
-                )
+                display_text, font, stroke_w, line_spacing = _choose_cover_layout(draw, clean_proj_name, img_w, img_h, custom_font)
+                draw.multiline_text((img_w / 2, img_h / 2), display_text, font=font, fill="white", align="center", anchor="mm", spacing=line_spacing, stroke_width=stroke_w, stroke_fill="black")
                 img.convert("RGB").save(temp_cover_png)
 
             ffmpeg_concat_cmd = [
@@ -584,14 +510,9 @@ def render_faceless_video(voice_name, voice_path, timeline, proj_dir, proj_name,
             ]
             concat_result = subprocess.run(ffmpeg_concat_cmd, capture_output=True, text=True, errors='ignore', creationflags=creation_flags)
             final_video_ready = concat_result.returncode == 0 and os.path.exists(out_file) and os.path.getsize(out_file) > 0
-
-            if not final_video_ready:
-                frame_error = (concat_result.stderr or concat_result.stdout or "Ghép ảnh bìa thất bại")[-400:]
-        except Exception as cover_error:
-            frame_error = str(cover_error)
+        except Exception: pass
 
     if not final_video_ready:
-        log_cb(f"[{voice_name}] ⚠️ Không tạo được ảnh bìa tạm, dùng luôn video render gốc. {frame_error[:180]}")
         shutil.copy2(temp_main_mp4, out_file)
         final_video_ready = os.path.exists(out_file) and os.path.getsize(out_file) > 0
 
@@ -603,16 +524,11 @@ def render_faceless_video(voice_name, voice_path, timeline, proj_dir, proj_name,
             try: os.remove(f_path)
             except: pass
 
-    # ĐOẠN NÀY ĐÃ XÓA SẠCH CODE GHI CSV (EXCEL) CŨ VÌ ĐÃ CÓ DATABASE
-
     shopee_out_of_stock = is_shopee_out_of_stock_project(proj_dir)
-    # Ghi thẳng vào bảng shopee_jobs trong Database
+    from shopee_export import export_rendered_video_to_shopee_files
     exported_to_shopee, _ = export_rendered_video_to_shopee_files(proj_dir, out_file, config=config, default_status="Chưa đăng")
     
-    if shopee_out_of_stock:
-        log_cb(f"[{voice_name}] ⏭️ Shopee đang để Hết hàng, bỏ qua lưu Job.")
-    elif exported_to_shopee:
-        log_cb(f"[{voice_name}] ✅ Đã lưu Job đăng Shopee vào Database thành công!")
+    if shopee_out_of_stock: log_cb(f"[{voice_name}] ⏭️ Shopee Hết hàng, bỏ qua lưu Job.")
+    elif exported_to_shopee: log_cb(f"[{voice_name}] ✅ Đã lưu Job Shopee thành công!")
         
-    # Trả về danh sách CHÍNH XÁC những video Broll đã bị FFmpeg nhét vào lò
     return list(global_used_vids)

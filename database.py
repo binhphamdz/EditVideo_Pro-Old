@@ -41,6 +41,13 @@ def init_db():
     conn = get_connection()
     cursor = conn.cursor()
 
+    # [MIGRATION] Thêm cột last_used vào voices nếu DB cũ chưa có
+    try:
+        cursor.execute("ALTER TABLE voices ADD COLUMN last_used TIMESTAMP")
+        conn.commit()
+    except Exception:
+        pass  # Cột đã tồn tại, bỏ qua
+
     # 1. Bảng Projects (Bổ sung context, ảnh mẫu, links)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS projects (
@@ -57,7 +64,7 @@ def init_db():
         )
     ''')
 
-    # 2. Bảng Voices (Của Tab 1)
+ # 2. Bảng Voices (Bổ sung cột last_used)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS voices (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -65,6 +72,7 @@ def init_db():
             file_name TEXT NOT NULL,
             usage_count INTEGER DEFAULT 0,
             srt_cache TEXT,
+            last_used TIMESTAMP, 
             status TEXT DEFAULT 'active',
             FOREIGN KEY (project_id) REFERENCES projects (id) ON DELETE CASCADE,
             UNIQUE(project_id, file_name)
