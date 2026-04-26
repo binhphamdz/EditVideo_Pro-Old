@@ -232,7 +232,7 @@ def render_faceless_video(voice_name, voice_path, timeline, proj_dir, proj_name,
         # Biến mảng này thành một hàng đợi (Queue), kiểm tra xem file có thật trên ổ cứng không
         ai_queue = [v for v in ai_chosen_videos if os.path.exists(os.path.join(proj_dir, "Broll", v))]
 
-        while current_dur < actual_req_dur and fail_safe < 20:
+        while current_dur < actual_req_dur and fail_safe < 200:
             
             # ƯU TIÊN 1: Rút video từ kịch bản của AI ra dùng trước
             if ai_queue:
@@ -293,7 +293,12 @@ def render_faceless_video(voice_name, voice_path, timeline, proj_dir, proj_name,
             fail_safe += 1
 
         if scene_vids:
-            selected_clips.append({'vids': scene_vids, 'dur': actual_req_dur})
+            # Dùng thời lượng thực tế sau speed để không bị lệch mốc thời gian giữa scene.
+            scene_real_dur = sum(
+                clip['trim'] / max(clip['speed'] * speed_val, 0.01)
+                for clip in scene_vids
+            )
+            selected_clips.append({'vids': scene_vids, 'dur': scene_real_dur})
         current_time = end_time
 
     # =======================================================

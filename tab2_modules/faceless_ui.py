@@ -446,12 +446,6 @@ class FacelessTab:
             # =======================================================
             import database
             db_proj_id = database.get_or_create_project(proj_name)
-            
-            # Bọc toàn bộ database operations vào lock để chống "database is locked"
-            with database.db_lock:
-                conn = database.get_connection()
-                cursor = conn.cursor()
-            
             # =======================================================
             # 2. BÓC BĂNG (Lấy nội dung chữ từ file âm thanh)
             # =======================================================

@@ -1732,40 +1732,44 @@ class BRollTab:
         if not self.current_project_id: return
         
         import database
-        conn = database.get_connection()
-        cursor = conn.cursor()
         
-        proj_name = self.main_app.projects[self.current_project_id]['name']
-        cursor.execute("SELECT id FROM projects WHERE name = ?", (proj_name,))
-        row = cursor.fetchone()
-        if not row: return
-        db_proj_id = row['id']
-        
-        for vid_name, txt_widget in list(self.desc_entries.items()):
-            if self._get_ai_task_state(self.current_project_id, vid_name):
-                continue
-            
+        # [BẢN ĐỘ MỚI] Bọc Lock để chống kẹt khi vừa gõ phím vừa render đa luồng
+        with database.db_lock:
+            conn = database.get_connection()
             try:
-                widget_text = txt_widget.get("1.0", tk.END).strip()
-                if self._is_transient_ai_message(widget_text):
-                    continue
+                cursor = conn.cursor()
+                proj_name = self.main_app.projects[self.current_project_id]['name']
+                cursor.execute("SELECT id FROM projects WHERE name = ?", (proj_name,))
+                row = cursor.fetchone()
+                if not row: return
+                db_proj_id = row['id']
                 
-                keep_audio = 1 if (hasattr(self, 'audio_vars') and vid_name in self.audio_vars and self.audio_vars[vid_name].get()) else 0
-                
-                # 1. Đảm bảo file này đã có trong DB (Nếu file mới copy vào thì tự tạo dòng mới)
-                cursor.execute('''INSERT OR IGNORE INTO brolls (project_id, file_name, status) VALUES (?, ?, 'active')''', (db_proj_id, vid_name))
-                
-                # 2. Cập nhật nội dung mô tả
-                cursor.execute('''
-                    UPDATE brolls 
-                    SET description = ?, keep_audio = ? 
-                    WHERE project_id = ? AND file_name = ?
-                ''', (widget_text, keep_audio, db_proj_id, vid_name))
-            except Exception:
-                pass 
-                
-        conn.commit()
-        conn.close()
+                for vid_name, txt_widget in list(self.desc_entries.items()):
+                    if self._get_ai_task_state(self.current_project_id, vid_name):
+                        continue
+                    
+                    try:
+                        widget_text = txt_widget.get("1.0", tk.END).strip()
+                        if self._is_transient_ai_message(widget_text):
+                            continue
+                        
+                        keep_audio = 1 if (hasattr(self, 'audio_vars') and vid_name in self.audio_vars and self.audio_vars[vid_name].get()) else 0
+                        
+                        # 1. Đảm bảo file này đã có trong DB
+                        cursor.execute('''INSERT OR IGNORE INTO brolls (project_id, file_name, status) VALUES (?, ?, 'active')''', (db_proj_id, vid_name))
+                        
+                        # 2. Cập nhật nội dung mô tả
+                        cursor.execute('''
+                            UPDATE brolls 
+                            SET description = ?, keep_audio = ? 
+                            WHERE project_id = ? AND file_name = ?
+                        ''', (widget_text, keep_audio, db_proj_id, vid_name))
+                    except Exception:
+                        pass 
+                        
+                conn.commit()
+            finally:
+                conn.close() # Dù lỗi hay không vẫn phải trả lại kết nối
         
         # Báo hiệu UI
         try:
