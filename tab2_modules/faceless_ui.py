@@ -426,8 +426,12 @@ class FacelessTab:
         except: pass
 
     def _process_single(self, voice_name, proj_dir, proj_name):
-        from main import GLOBAL_OUT_DIR, EXCEL_LOG_FILE 
+        from main import GLOBAL_OUT_DIR
         import database
+        from .video_engine import render_faceless_video, get_vid_info
+        from .ai_services import get_transcription, get_director_timeline
+        from datetime import datetime
+        import os
         
         try:
             voice_path = os.path.join(proj_dir, "Voices", voice_name)
@@ -440,7 +444,7 @@ class FacelessTab:
             cursor.execute("SELECT id FROM projects WHERE name = ?", (proj_name,))
             db_proj_id = cursor.fetchone()['id']
             
-            # 2. Bóc băng
+            # 2. Bóc băng (Giữ nguyên logic của sếp)
             try:
                 voice_text = self.main_app.tab1.get_voice_srt_or_extract(pid, voice_name, voice_path)
                 self.add_log(f"[{voice_name}] ✅ Dùng SRT (cache hoặc extract mới)")
@@ -448,9 +452,7 @@ class FacelessTab:
                 self.add_log(f"[{voice_name}] ⚠️ Fallback extract: {str(e)[:50]}")
                 voice_text = get_transcription(voice_path, voice_name, self.main_app.config.get("boc_bang_mode", "groq"), self.main_app.config, self.add_log)
             
-            # =======================================================
-            # [Ổ KHÓA CŨ ĐÃ BỊ PHÁ] Lấy danh sách Broll từ Database
-            # =======================================================
+            # 3. Lấy thông tin Broll từ Database
             cursor.execute("SELECT file_name, duration, description, usage_count, keep_audio FROM brolls WHERE project_id = ? AND status = 'active'", (db_proj_id,))
             broll_rows = cursor.fetchall()
             
@@ -464,21 +466,29 @@ class FacelessTab:
                 broll_data[v] = {'usage_count': usage, 'keep_audio': bool(r['keep_audio']), 'duration': r['duration'], 'description': desc}
                 broll_text += f"- File: '{v}' (Dài {dur}s) | Đã dùng: {usage} lần | Mô tả: {desc}\n"
 
-            # 3. Gọi AI Đạo Diễn 
+            # 4. Gọi AI Đạo Diễn 
             timeline = get_director_timeline(voice_text, broll_text, self.main_app.config, self.add_log, voice_name)
             
-            # 4. Render Video 
+            # 5. Render Video và Ghi vào Database Shopee
+            from shopee_export import export_rendered_video_to_shopee_files, is_shopee_out_of_stock_project
+            
             actual_used_brolls = render_faceless_video(
                 voice_name, voice_path, timeline, proj_dir, proj_name, 
-                self.main_app.config, out_file, GLOBAL_OUT_DIR, EXCEL_LOG_FILE, self.add_log, broll_data
+                self.main_app.config, out_file, GLOBAL_OUT_DIR, self.add_log, broll_data
             )
+            
+            shopee_out_of_stock = is_shopee_out_of_stock_project(proj_dir)
+            if shopee_out_of_stock:
+                self.add_log(f"[{voice_name}] ⏭️ Shopee đang để Hết hàng, bỏ qua ghi file job đăng.")
+            else:
+                exported_to_shopee, shopee_export_path = export_rendered_video_to_shopee_files(proj_dir, out_file, config=self.main_app.config, default_status="Chưa đăng")
+                if exported_to_shopee:
+                    self.add_log(f"[{voice_name}] ✅ Đã ghi Job Shopee vào Database.")
 
             self.completed_count += 1
             self.add_log(f"✅ THÀNH CÔNG: Đã lưu {voice_name}!")
             
-            # =======================================================
-            # [SIÊU NHÂN DATABASE] - CỘNG ĐIỂM SIÊU TỐC KHÔNG CẦN KHÓA
-            # =======================================================
+            # 6. Cộng điểm chính xác vào Database
             try:
                 # Cộng điểm Voice
                 cursor.execute("UPDATE voices SET usage_count = usage_count + 1 WHERE project_id = ? AND file_name = ?", (db_proj_id, voice_name))
@@ -494,9 +504,9 @@ class FacelessTab:
                 if self.main_app.tab1.current_project_id == pid:
                     self.main_app.root.after(0, lambda: self.main_app.tab1.render_video_list())
             except Exception as e:
-                self.add_log(f"⚠️ Lỗi cập nhật số lần dùng: {e}")
+                self.add_log(f"⚠️ Lỗi cập nhật Database số lần dùng: {e}")
             finally:
-                conn.close() # Dùng xong trả lại kết nối
+                conn.close() 
 
         except Exception as e:
             self.add_log(f"❌ LỖI {voice_name}: {e}")

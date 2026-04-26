@@ -176,7 +176,10 @@ def get_vid_info(file_path):
     except:
         return 5.0, False
 
-def render_faceless_video(voice_name, voice_path, timeline, proj_dir, proj_name, config, out_file, out_dir, excel_log_file, log_cb, broll_data):
+# [BẢN ĐỘ MỚI] Gọt bớt tham số thừa, chỉ giữ những gì cần thiết
+def render_faceless_video(voice_name, voice_path, timeline, proj_dir, proj_name, config, out_file, out_dir, logger, broll_data=None):
+    # [BẢN ĐỘ MỚI] Tạo túi đựng các cảnh trám đã được sử dụng thực tế
+    used_brolls = []
     speed_val = config.get("video_speed", 1.0)
     auto_speed_max = config.get("auto_speed_max", 1.4)
     bright_val = config.get("video_bright", 1.0)
@@ -608,4 +611,4 @@ def render_faceless_video(voice_name, voice_path, timeline, proj_dir, proj_name,
         log_cb(f"[{voice_name}] ✅ Đã ghi dữ liệu Shopee vào: {shopee_export_path}")
         
     # [BẢN ĐỘ MỚI] Trả về danh sách CHÍNH XÁC những video Broll đã bị FFmpeg nhét vào lò
-    return global_used_vids
+    return list(global_used_vids)
