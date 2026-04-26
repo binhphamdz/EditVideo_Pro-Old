@@ -63,21 +63,34 @@ def normalize_shopee_product_link(value):
     if not text:
         return ""
 
-    text = text.split()[0].strip().strip('"\'')
+    # [BẢN ĐỘ MỚI] Chia tách theo từng dòng (\n) thay vì gộp chung
+    lines = [line.strip() for line in text.split('\n') if line.strip()]
+    
+    clean_links = []
+    from urllib.parse import urlsplit, urlunsplit
+    
+    for line in lines:
+        # Xử lý từng link một trên mỗi dòng
+        part = line.split()[0].strip().strip('"\'')
+        try:
+            parsed = urlsplit(part)
+            if parsed.scheme and parsed.netloc:
+                clean_path = parsed.path.rstrip("/") if parsed.path not in ("", "/") else parsed.path
+                part = urlunsplit((parsed.scheme, parsed.netloc, clean_path, "", ""))
+        except Exception:
+            pass
 
-    try:
-        parsed = urlsplit(text)
-        if parsed.scheme and parsed.netloc:
-            clean_path = parsed.path.rstrip("/") if parsed.path not in ("", "/") else parsed.path
-            return urlunsplit((parsed.scheme, parsed.netloc, clean_path, "", ""))
-    except Exception:
-        pass
-
-    if "?" in text:
-        text = text.split("?", 1)[0]
-    if "#" in text:
-        text = text.split("#", 1)[0]
-    return text.rstrip("/")
+        if "?" in part:
+            part = part.split("?", 1)[0]
+        if "#" in part:
+            part = part.split("#", 1)[0]
+            
+        part = part.rstrip("/")
+        if part:
+            clean_links.append(part)
+            
+    # Nối lại bằng dấu xuống dòng (\n) để trả về nguyên vẹn cục link
+    return "\n".join(clean_links)
 
 
 def _get_column_map(headers):
@@ -362,18 +375,28 @@ def export_rendered_video_to_shopee_files(proj_dir, out_file, config=None, defau
         return False, ""
 
     target_csv = get_shopee_csv_path(config)
-    link_cell = _build_link_cell(product_info["links"])
 
     with _export_lock:
         _ensure_csv_file(target_csv)
         rows = _read_csv_rows(target_csv)
+        
         stt_value = _next_stt(rows)
+        
+        # --- [BẢN ĐỘ MỚI] GỘP TẤT CẢ LINK VÀO 1 Ô ---
+        # 1. Lấy toàn bộ link trong project và lọc bỏ những ô trống
+        valid_links = [normalize_shopee_product_link(l) for l in product_info["links"] if str(l).strip()]
+        
+        # 2. Gộp tất cả lại bằng dấu xuống dòng (\n) giống hệt như bấm Alt+Enter trong Excel
+        # (Auto Post khi đọc sẽ tự hiểu và dán lần lượt từng link vào Shopee)
+        final_link_cell = "\n".join(valid_links)
+        # -------------------------------------------------------
+
         rows.append(
             [
                 stt_value,
                 os.path.basename(out_file),
                 product_info["product_name"],
-                link_cell,
+                final_link_cell,  # <--- Nhồi toàn bộ link vào đây
                 product_info["caption"],
                 default_status,
             ]
