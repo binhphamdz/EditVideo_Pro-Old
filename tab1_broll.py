@@ -1475,10 +1475,30 @@ class BRollTab:
         
         self.check_vars_act.clear()
         self.check_vars_tr.clear()
-        self.thumb_labels.clear()  # [MỚI] Clear thumbnail labels
+        self.thumb_labels.clear()  
         self.audio_vars.clear()
         
-        saved_vids = p_data.get('videos', {})
+        # --- [BẢN ĐỘ MỚI] ĐỌC DATA TỪ DATABASE THAY VÌ JSON ---
+        import database
+        conn = database.get_connection()
+        cursor = conn.cursor()
+        proj_name = self.main_app.projects[project_id]['name']
+        cursor.execute("SELECT id FROM projects WHERE name = ?", (proj_name,))
+        row = cursor.fetchone()
+        if not row:
+            conn.close()
+            return
+        db_proj_id = row['id']
+        
+        # Hút toàn bộ Broll đang dùng và Thùng rác từ DB
+        cursor.execute("SELECT * FROM brolls WHERE project_id = ? AND status = 'active'", (db_proj_id,))
+        active_brolls_db = {r['file_name']: dict(r) for r in cursor.fetchall()}
+        
+        cursor.execute("SELECT * FROM brolls WHERE project_id = ? AND status = 'trash'", (db_proj_id,))
+        trash_brolls_db = {r['file_name']: dict(r) for r in cursor.fetchall()}
+        conn.close()
+        # -------------------------------------------------------
+
         if not act_files:
             active_empty_text = "Không tìm thấy cảnh nào phù hợp." if self.ent_search.get().strip() else "Chưa có cảnh nào trong danh sách đang dùng."
             tk.Label(self.frame_act, text=active_empty_text, fg="#7f8c8d", font=("Arial", 10, "italic")).pack(pady=20)
@@ -1488,7 +1508,7 @@ class BRollTab:
             
             header_fr.columnconfigure(0, weight=0, minsize=40)
             header_fr.columnconfigure(1, weight=1, minsize=800)
-            header_fr.columnconfigure(2, weight=1, minsize=300)  # Tăng minsize từ 250 lên 350
+            header_fr.columnconfigure(2, weight=1, minsize=300)
             header_fr.columnconfigure(3, weight=3, minsize=400)
             header_fr.columnconfigure(4, weight=0, minsize=120)
             header_fr.columnconfigure(5, weight=0, minsize=120)
@@ -1501,12 +1521,15 @@ class BRollTab:
             tk.Label(header_fr, text="Số Lần", bg="#bdc3c7", font=("Arial", 10, "bold")).grid(row=0, column=5, sticky="e", padx=10)
 
         for vid_name in act_files:
+            # Bốc data từ cái Database vừa gọi lúc nãy
+            b_data = active_brolls_db.get(vid_name, {})
+            
             row_fr = tk.Frame(self.frame_act, bg="#ffffff", bd=1, relief="ridge", pady=8)
             row_fr.pack(fill="x", padx=10, pady=4)
             
             row_fr.columnconfigure(0, weight=0, minsize=40)
             row_fr.columnconfigure(1, weight=1, minsize=800)
-            row_fr.columnconfigure(2, weight=1, minsize=300) # Tăng minsize Info
+            row_fr.columnconfigure(2, weight=1, minsize=300)
             row_fr.columnconfigure(3, weight=3, minsize=400)
             row_fr.columnconfigure(4, weight=0, minsize=120)
             row_fr.columnconfigure(5, weight=0, minsize=120)
@@ -1517,7 +1540,7 @@ class BRollTab:
             
             thumb_lbl = tk.Label(row_fr, bg="#000000", width=35, height=6)
             thumb_lbl.grid(row=0, column=1, sticky="w", padx=5)
-            self.thumb_labels[vid_name] = thumb_lbl  # [MỚI] Lưu thumbnail label
+            self.thumb_labels[vid_name] = thumb_lbl  
             
             thumb_path = os.path.join(broll_dir, ".thumbnails", f"{vid_name}.jpg")
             if os.path.exists(thumb_path):
@@ -1531,8 +1554,7 @@ class BRollTab:
             col2 = tk.Frame(row_fr, bg="#ffffff")
             col2.grid(row=0, column=2, sticky="nw", padx=5)
             
-            dur = saved_vids.get(vid_name, {}).get('duration', 0)
-            # ĐÃ XÓA GỌT TÊN `[:20]...` VÀ THÊM TÍNH NĂNG XUỐNG DÒNG (wraplength)
+            dur = b_data.get('duration', 0)
             tk.Label(col2, text=f"🎥 {vid_name}\n⏳ {dur} giây", font=("Arial", 9, "bold"), bg="#ffffff", justify="left", wraplength=330).pack(anchor="nw", pady=(0, 5))
             
             btn_fr1 = tk.Frame(col2, bg="#ffffff")
@@ -1543,16 +1565,12 @@ class BRollTab:
             btn_fr2 = tk.Frame(col2, bg="#ffffff")
             btn_fr2.pack(anchor="nw", pady=2)
 
-            # [MỚI] Nút Làm mới ảnh
             tk.Button(btn_fr2, text="📸 Làm mới", bg="#3498db", fg="white", font=("Arial", 8, "bold"), width=8, command=lambda v=vid_name: self.refresh_single_thumbnail(v)).pack(side="left", padx=(0, 5))
-            
-            # [MỚI] Nút AI Soi riêng lẻ
             tk.Button(btn_fr2, text="🤖 AI Soi", bg="#d35400", fg="white", font=("Arial", 8, "bold"), width=8, command=lambda v=vid_name: self.start_single_auto_tag(v)).pack(side="left", padx=(0, 5))
-            
             tk.Button(btn_fr2, text="🔄 Thay", bg="#f39c12", fg="white", font=("Arial", 8, "bold"), width=8, command=lambda v=vid_name: self.replace_video(v)).pack(side="left", padx=(0, 5))
             tk.Button(btn_fr2, text="🗑️ Xóa", bg="#e74c3c", fg="white", font=("Arial", 8, "bold"), width=8, command=lambda v=vid_name: self.move_to_trash(v)).pack(side="left")
 
-            description_text = saved_vids.get(vid_name, {}).get("description", "")
+            description_text = b_data.get("description", "")
             ai_state = self._get_ai_task_state(project_id, vid_name)
             if ai_state:
                 description_text = ai_state.get("message", description_text)
@@ -1563,34 +1581,28 @@ class BRollTab:
             txt_desc.bind("<MouseWheel>", self._on_mousewheel)
             self.desc_entries[vid_name] = txt_desc
 
-            # ========================================================
-            # [BÙA AUTO-SAVE] TỰ ĐỘNG LƯU SAU KHI SẾP NGỪNG GÕ 1 GIÂY
-            # ========================================================
             def on_text_change(event, v_name=vid_name):
                 self._clear_ai_task_state(project_id, v_name)
-                self.update_missing_desc_count() # Kích hoạt đếm số lượng ngay lập tức khi gõ chữ
+                self.update_missing_desc_count()
                 
                 if hasattr(self, f"timer_{v_name}"):
                     self.parent.after_cancel(getattr(self, f"timer_{v_name}"))
                 timer_id = self.parent.after(1000, self.save_all_descriptions)
                 setattr(self, f"timer_{v_name}", timer_id)
 
-            # Gắn sự kiện: Cứ nhấc tay khỏi bàn phím là kích hoạt đếm ngược
             txt_desc.bind("<KeyRelease>", on_text_change)
-            # ========================================================
 
             col4 = tk.Frame(row_fr, bg="#ffffff")
             col4.grid(row=0, column=4, sticky="nw", padx=5, pady=10)
-            keep_audio_var = tk.BooleanVar(value=saved_vids.get(vid_name, {}).get('keep_audio', False))
+            keep_audio_var = tk.BooleanVar(value=bool(b_data.get('keep_audio', 0)))
             self.audio_vars[vid_name] = keep_audio_var
             tk.Checkbutton(col4, text="🔊 Bật Âm", variable=keep_audio_var, bg="#ffffff", font=("Arial", 9, "bold"), fg="#c0392b", command=self.save_all_descriptions).pack(anchor="nw")
             tk.Label(col4, text="(Giữ tiếng gốc)", bg="#ffffff", font=("Arial", 8, "italic"), fg="#7f8c8d").pack(anchor="nw", padx=20)
 
-            usage = saved_vids.get(vid_name, {}).get('usage_count', 0)
+            usage = b_data.get('usage_count', 0)
             usage_color = "#27ae60" if usage == 0 else ("#f39c12" if usage < 3 else "#c0392b")
             tk.Label(row_fr, text=f"{usage} lần", font=("Arial", 16, "bold"), fg=usage_color, bg="#ffffff").grid(row=0, column=5, sticky="e", padx=15)
 
-        saved_trash = p_data.get('trash', {})
         if not tr_files:
             trash_empty_text = "Không có cảnh nào trong thùng rác khớp từ khóa." if self.ent_search.get().strip() else "Thùng rác đang trống."
             tk.Label(self.frame_tr, text=trash_empty_text, fg="#7f8c8d", font=("Arial", 10, "italic")).pack(pady=20)
@@ -1609,6 +1621,9 @@ class BRollTab:
             tk.Label(header_tr, text="Mô Tả Cũ (Chỉ xem)", bg="#eab5b5", font=("Arial", 10, "bold")).grid(row=0, column=3, sticky="w", padx=5)
 
         for vid_name in tr_files:
+            # Lấy data thùng rác từ DB
+            b_data = trash_brolls_db.get(vid_name, {})
+            
             row_fr = tk.Frame(self.frame_tr, bg="#f9ebed", bd=1, relief="ridge", pady=8)
             row_fr.pack(fill="x", padx=10, pady=4)
             
@@ -1623,7 +1638,7 @@ class BRollTab:
             
             thumb_lbl = tk.Label(row_fr, bg="#000000", width=35, height=6)
             thumb_lbl.grid(row=0, column=1, sticky="w", padx=5)
-            self.thumb_labels[f"trash_{vid_name}"] = thumb_lbl  # [MỚI] Lưu thumbnail label
+            self.thumb_labels[f"trash_{vid_name}"] = thumb_lbl
             
             thumb_path = os.path.join(trash_dir, ".thumbnails", f"{vid_name}.jpg")
             if os.path.exists(thumb_path):
@@ -1636,7 +1651,7 @@ class BRollTab:
             col2 = tk.Frame(row_fr, bg="#f9ebed")
             col2.grid(row=0, column=2, sticky="nw", padx=5)
             
-            dur = saved_trash.get(vid_name, {}).get('duration', 0)
+            dur = b_data.get('duration', 0)
             tk.Label(col2, text=f"🎥 {vid_name}\n⏳ {dur} giây", font=("Arial", 9, "bold", "overstrike"), fg="#7f8c8d", bg="#f9ebed", justify="left", wraplength=330).pack(anchor="nw", pady=(0, 5))
             
             btn_fr = tk.Frame(col2, bg="#f9ebed")
@@ -1644,7 +1659,7 @@ class BRollTab:
             tk.Button(btn_fr, text="▶ Xem", bg="#3498db", fg="white", font=("Arial", 8, "bold"), width=8, command=lambda p=os.path.join(trash_dir, vid_name): os.startfile(p)).pack(side="left", padx=(0, 5))
             tk.Button(btn_fr, text="♻️ Khôi phục", bg="#27ae60", fg="white", font=("Arial", 8, "bold"), width=10, command=lambda v=vid_name: self.restore_from_trash(v)).pack(side="left")
             
-            tk.Label(row_fr, text=saved_trash.get(vid_name, {}).get("description", "(Trống)"), font=("Arial", 10), bg="#fdfefe", anchor="nw", justify="left", wraplength=600, relief="solid", bd=1, padx=5, pady=5).grid(row=0, column=3, sticky="nsew", padx=5)
+            tk.Label(row_fr, text=b_data.get("description", "(Trống)"), font=("Arial", 10), bg="#fdfefe", anchor="nw", justify="left", wraplength=600, relief="solid", bd=1, padx=5, pady=5).grid(row=0, column=3, sticky="nsew", padx=5)
 
         self.parent.update_idletasks()
         self._sync_canvas_window_widths()
@@ -1653,7 +1668,6 @@ class BRollTab:
         self._bind_mousewheel_to_all_children(self.frame_act)
         self._bind_mousewheel_to_all_children(self.frame_tr)
         
-        # [THÊM DÒNG NÀY VÀO ĐÂY] Đồ thị vẽ xong thì bắt nó đếm luôn!
         self.update_missing_desc_count()
 
     def save_all_descriptions(self):
@@ -1838,20 +1852,33 @@ class BRollTab:
         self._bulk_toggle_project_status()
 
     def update_missing_desc_count(self):
-        """ Đếm xem còn bao nhiêu ô chưa gõ chữ """
+        """ Đếm xem còn bao nhiêu ô chưa gõ chữ (đọc từ Database) """
         if not self.current_project_id:
             self.lbl_missing_desc.config(text="Chưa có cảnh để điền mô tả", fg="#7f8c8d")
             return
 
-        p_data = self.main_app.get_project_data(self.current_project_id)
-        saved_videos = p_data.get("videos", {})
-        target_names = self.filtered_act_files if self.filtered_act_files is not None else list(saved_videos.keys())
+        import database
+        conn = database.get_connection()
+        cursor = conn.cursor()
+        proj_name = self.main_app.projects[self.current_project_id]['name']
+        cursor.execute("SELECT id FROM projects WHERE name = ?", (proj_name,))
+        row = cursor.fetchone()
+        if not row:
+            conn.close()
+            return
+        
+        # Bốc toàn bộ danh sách broll đang active từ DB lên
+        cursor.execute("SELECT file_name, description FROM brolls WHERE project_id = ? AND status = 'active'", (row['id'],))
+        db_brolls = {r['file_name']: r['description'] for r in cursor.fetchall()}
+        conn.close()
+
+        target_names = self.filtered_act_files if self.filtered_act_files is not None else list(db_brolls.keys())
 
         empty_count = 0
         total_count = len(target_names)
 
         for vid_name in target_names:
-            saved_text = saved_videos.get(vid_name, {}).get("description", "").strip()
+            saved_text = db_brolls.get(vid_name, "").strip()
             ai_state = self._get_ai_task_state(self.current_project_id, vid_name)
 
             if ai_state:
