@@ -1,15 +1,47 @@
 import os
+import sys
 import time
 import requests
 import json
 import random
 import hashlib
 import re # [MỚI] Bùa móc JSON chống AI nói nhảm
+from paths import BASE_PATH
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
+
+
+def _resolve_runtime_file(filename, config):
+    candidates = []
+
+    cfg_base = str((config or {}).get("app_base_path", "") or "").strip()
+    if cfg_base:
+        candidates.append(os.path.join(cfg_base, filename))
+
+    # Ưu tiên thư mục chứa file .exe / thư mục chạy hiện tại
+    candidates.append(os.path.join(BASE_PATH, filename))
+    candidates.append(os.path.join(os.getcwd(), filename))
+
+    if getattr(sys, 'frozen', False):
+        try:
+            candidates.append(os.path.join(os.path.dirname(sys.executable), filename))
+        except Exception:
+            pass
+
+    # Loại trùng vẫn giữ thứ tự ưu tiên
+    unique_candidates = []
+    for path in candidates:
+        if path and path not in unique_candidates:
+            unique_candidates.append(path)
+
+    for path in unique_candidates:
+        if os.path.exists(path):
+            return path, unique_candidates
+
+    return "", unique_candidates
 
 def _normalize_text(text):
     return re.sub(r'\s+', ' ', str(text or '')).strip()
@@ -189,8 +221,9 @@ def _words_to_base_segments(words_list):
 def get_drive_service(client_secret_path, base_path):
     SCOPES = ['https://www.googleapis.com/auth/drive.file']
     creds = None
-    
-    token_path = os.path.join(base_path, 'token.json')
+
+    token_dir = base_path if os.path.isdir(base_path) else os.path.dirname(client_secret_path)
+    token_path = os.path.join(token_dir, 'token.json')
     
     if os.path.exists(token_path):
         creds = Credentials.from_authorized_user_file(token_path, SCOPES)
@@ -205,7 +238,7 @@ def get_drive_service(client_secret_path, base_path):
     return build('drive', 'v3', credentials=creds)
 
 def get_transcription(voice_path, voice_name, mode, config, log_cb):
-    if mode == "groq":
+    def _transcribe_with_groq():
         log_cb(f"[{voice_name}] Bắt đầu: Gọi Groq bóc băng...")
         url_groq = "https://api.groq.com/openai/v1/audio/transcriptions"
         with open(voice_path, "rb") as f:
@@ -229,16 +262,18 @@ def get_transcription(voice_path, voice_name, mode, config, log_cb):
         merged_segments = _merge_related_short_segments(base_segments, target_min=4.0, target_max=6.0)
         return _format_timeline_text(merged_segments)
 
+    if mode == "groq":
+        return _transcribe_with_groq()
+
     elif mode == "ohfree":
-        # =================================================================
-        # [ĐÃ SỬA] DÙNG LA BÀN TÌM ĐÚNG FILE CLIENT_SECRET CẠNH CỤC EXE
-        # =================================================================
-        base_path = config.get("app_base_path", os.getcwd())
-        client_secret = os.path.join(base_path, "client_secret.json")
-        
+        # Dò client_secret ở nhiều vị trí, ưu tiên cùng cấp file .exe.
+        client_secret, lookup_paths = _resolve_runtime_file("client_secret.json", config)
+        base_path = os.path.dirname(client_secret) if client_secret else BASE_PATH
+
         cookie = config.get("ohfree_cookie", "")
-        if not os.path.exists(client_secret): 
-            raise Exception(f"Chưa cấu hình client_secret.json! Hãy để file này cạnh file .exe nhé. (Đang tìm tại: {client_secret})")
+        if not client_secret:
+            paths_text = " | ".join(lookup_paths)
+            raise Exception(f"Chưa cấu hình client_secret.json! Các đường dẫn đã dò: {paths_text}")
         if not cookie: 
             raise Exception("Chưa cấu hình Cookie OhFree!")
 
@@ -266,6 +301,9 @@ def get_transcription(voice_path, voice_name, mode, config, log_cb):
         finally:
             try: drive_service.files().delete(fileId=file_id).execute()
             except: pass
+
+    # Nếu mode lạ thì fallback về Groq
+    return _transcribe_with_groq()
 
 def get_director_timeline(voice_text, broll_text, config, log_cb, voice_name, project_context=""):
     import time

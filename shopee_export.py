@@ -52,26 +52,55 @@ def _build_caption(product_name):
     return f"{short_name} {CAPTION_HASHTAGS}"
 
 def _load_project_product_info(proj_dir):
-    project_data_path = os.path.join(proj_dir, "project_data.json")
-    if not os.path.exists(project_data_path): return None
+    # DB-only: lấy thông tin dự án qua project_pid (tên thư mục), sau đó đọc bảng projects.
+    project_pid = os.path.basename(os.path.normpath(proj_dir))
 
-    try:
-        with open(project_data_path, "r", encoding="utf-8") as handle:
-            project_data = json.load(handle)
-    except Exception: return None
+    with database.db_lock:
+        conn = database.get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                "SELECT project_name FROM app_projects WHERE project_pid = ?",
+                (project_pid,),
+            )
+            ap_row = cursor.fetchone()
+            if not ap_row:
+                return None
 
-    out_of_stock = bool(project_data.get("shopee_out_of_stock", False))
+            proj_name = ap_row["project_name"]
+            cursor.execute(
+                """
+                SELECT product_name, product_links, shopee_out_of_stock
+                FROM projects
+                WHERE name = ?
+                """,
+                (proj_name,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+        finally:
+            conn.close()
+
+    out_of_stock = bool(row["shopee_out_of_stock"])
     if out_of_stock:
         return {"out_of_stock": True, "product_name": "", "caption": "", "links": [""] * 6}
 
-    product_name = str(project_data.get("product_name", "") or "").strip()
-    raw_links = project_data.get("product_links", [])
-    if not isinstance(raw_links, list): raw_links = []
+    product_name = str(row["product_name"] or "").strip()
+    raw_links = []
+    try:
+        loaded_links = json.loads(row["product_links"] or "[]")
+        if isinstance(loaded_links, list):
+            raw_links = loaded_links
+    except Exception:
+        raw_links = []
 
     links = [normalize_shopee_product_link(item) for item in raw_links[:6]]
-    if len(links) < 6: links.extend([""] * (6 - len(links)))
+    if len(links) < 6:
+        links.extend([""] * (6 - len(links)))
 
-    if not product_name or not any(links): return None
+    if not product_name or not any(links):
+        return None
 
     return {
         "out_of_stock": False,

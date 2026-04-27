@@ -323,44 +323,53 @@ class FacelessTab:
         if not os.path.exists(voice_dir):
             return bot.send_message(chat_id, "❌ Thư mục Voices chưa được tạo!")
 
-        # --- [BẢN ĐỘ MỚI - FIX LỖI TRÙNG NGÀY ĐA LUỒNG] ---
         db_proj_id = database.get_or_create_project(proj_name)
         
-        # BỌC KHÓA LUỒNG TẠI ĐÂY: Đảm bảo chỉ 1 người được vào lấy và cập nhật Voice 1 lúc
         with database.db_lock: 
             conn = database.get_connection()
             cursor = conn.cursor()
             
-            # 1. Quét tìm những Voice đã nghỉ ngơi trên 3 ngày (Hoặc chưa dùng bao giờ)
-            query = '''
+            # --- LUẬT THÉP 1: TÌM VOICE SẠCH 3 NGÀY ---
+            # Lấy những voice CHƯA TỪNG DÙNG hoặc dùng quá 3 ngày trước.
+            query_3_days = '''
                 SELECT file_name FROM voices 
                 WHERE project_id = ? 
                 AND (last_used IS NULL OR last_used <= datetime('now', '-3 days', 'localtime'))
                 ORDER BY usage_count ASC, last_used ASC
             '''
-            cursor.execute(query, (db_proj_id,))
+            cursor.execute(query_3_days, (db_proj_id,))
             rows = cursor.fetchall()
-            
-            # 2. FALLBACK 1: Nếu cạn kiệt, hạ tiêu chuẩn xuống 1 NGÀY (Tuyệt đối né hôm nay)
-            if not rows:
-                cursor.execute('''
+            all_voices = [r['file_name'] for r in rows]
+
+            # --- LUẬT THÉP 2: NẾU THIẾU, BÙ THÊM BẰNG VOICE SẠCH 1 NGÀY ---
+            # Giả sử Bot cần 3 voice, mà kho 3 ngày chỉ còn 1 voice. Ta sẽ bù thêm 2 voice từ kho 1 ngày.
+            if len(all_voices) < 3:
+                query_1_day = '''
                     SELECT file_name FROM voices 
                     WHERE project_id = ? 
-                    AND (last_used IS NULL OR last_used <= datetime('now', '-1 days', 'localtime'))
+                    AND last_used > datetime('now', '-3 days', 'localtime') 
+                    AND last_used <= datetime('now', '-1 days', 'localtime')
                     ORDER BY last_used ASC
-                ''', (db_proj_id,))
-                rows = cursor.fetchall()
+                '''
+                cursor.execute(query_1_day, (db_proj_id,))
+                rows_1_day = cursor.fetchall()
+                
+                for r in rows_1_day:
+                    if r['file_name'] not in all_voices:
+                        all_voices.append(r['file_name'])
+                    if len(all_voices) >= 3:
+                        break
+            
+            # Chốt sổ 3 voice đầu tiên tìm được
+            final_voices = all_voices[:3]
 
-            # 3. FALLBACK 2: Nếu vẫn không có, tức là TẤT CẢ voice đều đã bị dùng trong 24h qua!
-            if not rows:
+            # Nếu vẫn trống trơn, nghĩa là tất cả voice đều đã dùng trong 24h qua!
+            if not final_voices:
                 conn.close()
-                return bot.send_message(chat_id, "❌ KHO VOICE ĐÃ BỊ VẮT KIỆT!\nToàn bộ Voice của sếp đều đã được dùng trong 24h qua. Để tránh trùng lặp video, sếp vui lòng nạp thêm file mp3 mới vào nhé!")
+                return bot.send_message(chat_id, "❌ KHO VOICE ĐÃ BỊ VẮT KIỆT!\nToàn bộ Voice đều đã được dùng trong 24h qua. Đang bảo vệ chống trùng lặp, sếp vui lòng nạp thêm file mp3 mới!")
 
-            # 4. Chốt danh sách (Tối đa 3 voice)
-            all_voices = [r['file_name'] for r in rows][:3]
-
-            # 5. [QUAN TRỌNG NHẤT] KHÓA (GIỮ CHỖ) NGAY LẬP TỨC TRONG CÙNG 1 TRANSACTION!
-            for v in all_voices:
+            # 5. KHÓA GIỮ CHỖ (Ghi dấu ấn thời gian ngay lập tức)
+            for v in final_voices:
                 cursor.execute('''
                     UPDATE voices 
                     SET last_used = datetime('now', 'localtime') 
@@ -370,12 +379,11 @@ class FacelessTab:
             conn.close()
 
         self.main_app.config["app_base_path"] = BASE_PATH 
-        bot.send_message(chat_id, f"🎬 ĐẠO DIỄN AI NHẬN LỆNH!\n📁 Project: {proj_name}\n🎙️ Đã chốt {len(all_voices)} voice sạch (Không trùng lặp). Đang đưa vào lò...")
+        bot.send_message(chat_id, f"🎬 ĐẠO DIỄN AI NHẬN LỆNH!\n📁 Project: {proj_name}\n🎙️ Đã chốt {len(final_voices)} voice sạch (Né hoàn toàn hôm nay). Đang đưa vào lò...")
         
-        # Đẩy vào luồng render
         threading.Thread(
             target=self._run_multithread_batch, 
-            args=(all_voices, proj_dir, proj_name, bot, chat_id), 
+            args=(final_voices, proj_dir, proj_name, bot, chat_id), 
             daemon=True
         ).start()
 

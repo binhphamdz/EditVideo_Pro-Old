@@ -484,7 +484,7 @@ def render_faceless_video(voice_name, voice_path, timeline, proj_dir, proj_name,
     frame_error = ""
     for point in extract_points:
         frame_result = subprocess.run(
-        ['ffmpeg', '-y', '-ss', f"{point:.2f}", '-i', temp_main_mp4, '-frames:v', '1', temp_frame_jpg],
+        ['ffmpeg', '-y', '-ss', f"{point:.2f}", '-i', temp_main_mp4, '-frames:v', '1', '-q:v', '2', temp_frame_jpg],
             capture_output=True, text=True, encoding='utf-8', errors='ignore', creationflags=creation_flags,
         )
         if frame_result.returncode == 0 and os.path.exists(temp_frame_jpg) and os.path.getsize(temp_frame_jpg) > 0:
@@ -492,16 +492,42 @@ def render_faceless_video(voice_name, voice_path, timeline, proj_dir, proj_name,
             break
         frame_error = (frame_result.stderr or frame_result.stdout or "Không rõ lỗi")[-400:]
 
+    # Nếu không trích được frame thì vẫn tạo bìa nền trơn để không bỏ sót cover.
+    if not frame_ready:
+        try:
+            img = Image.new("RGBA", (1080, 1920), (22, 28, 36, 255))
+            draw = ImageDraw.Draw(img)
+            clean_proj_name = " ".join(proj_name.replace("_", " ").split()).upper()
+            display_text, font, stroke_w, line_spacing = _choose_cover_layout(draw, clean_proj_name, 1080, 1920, custom_font)
+            draw.multiline_text(
+                (540, 960),
+                display_text,
+                font=font,
+                fill="white",
+                align="center",
+                anchor="mm",
+                spacing=line_spacing,
+                stroke_width=stroke_w,
+                stroke_fill="black",
+            )
+            img.convert("RGB").save(temp_cover_png)
+            frame_ready = True
+            log_cb(f"[{voice_name}] ⚠️ Không trích được frame làm bìa, dùng bìa nền dự phòng. {frame_error[:120]}")
+        except Exception as e:
+            frame_error = str(e)
+
     final_video_ready = False
     if frame_ready:
         try:
-            with Image.open(temp_frame_jpg).convert("RGBA") as img:
-                draw = ImageDraw.Draw(img)
-                img_w, img_h = img.size
-                clean_proj_name = " ".join(proj_name.replace("_", " ").split()).upper()
-                display_text, font, stroke_w, line_spacing = _choose_cover_layout(draw, clean_proj_name, img_w, img_h, custom_font)
-                draw.multiline_text((img_w / 2, img_h / 2), display_text, font=font, fill="white", align="center", anchor="mm", spacing=line_spacing, stroke_width=stroke_w, stroke_fill="black")
-                img.convert("RGB").save(temp_cover_png)
+            # Nếu đã có frame thật thì vẽ text lên frame, nếu không thì dùng file cover dự phòng vừa tạo.
+            if os.path.exists(temp_frame_jpg) and os.path.getsize(temp_frame_jpg) > 0:
+                with Image.open(temp_frame_jpg).convert("RGBA") as img:
+                    draw = ImageDraw.Draw(img)
+                    img_w, img_h = img.size
+                    clean_proj_name = " ".join(proj_name.replace("_", " ").split()).upper()
+                    display_text, font, stroke_w, line_spacing = _choose_cover_layout(draw, clean_proj_name, img_w, img_h, custom_font)
+                    draw.multiline_text((img_w / 2, img_h / 2), display_text, font=font, fill="white", align="center", anchor="mm", spacing=line_spacing, stroke_width=stroke_w, stroke_fill="black")
+                    img.convert("RGB").save(temp_cover_png)
 
             ffmpeg_concat_cmd = [
                 "ffmpeg", "-y", "-loop", "1", "-t", "0.1", "-i", temp_cover_png, "-i", temp_main_mp4,
@@ -510,9 +536,22 @@ def render_faceless_video(voice_name, voice_path, timeline, proj_dir, proj_name,
             ]
             concat_result = subprocess.run(ffmpeg_concat_cmd, capture_output=True, text=True, errors='ignore', creationflags=creation_flags)
             final_video_ready = concat_result.returncode == 0 and os.path.exists(out_file) and os.path.getsize(out_file) > 0
+
+            # Fallback khi NVENC concat lỗi (thường gặp ở máy thiếu tài nguyên GPU).
+            if not final_video_ready:
+                ffmpeg_concat_fallback_cmd = [
+                    "ffmpeg", "-y", "-loop", "1", "-t", "0.1", "-i", temp_cover_png, "-i", temp_main_mp4,
+                    "-filter_complex", "[0:v][1:v]concat=n=2:v=1:a=0[v]", "-map", "[v]", "-map", "1:a",
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-c:a", "aac", "-b:a", "192k", out_file
+                ]
+                concat_fallback_result = subprocess.run(ffmpeg_concat_fallback_cmd, capture_output=True, text=True, errors='ignore', creationflags=creation_flags)
+                final_video_ready = concat_fallback_result.returncode == 0 and os.path.exists(out_file) and os.path.getsize(out_file) > 0
+                if final_video_ready:
+                    log_cb(f"[{voice_name}] ⚠️ NVENC gắn bìa lỗi, đã fallback sang libx264 thành công.")
         except Exception: pass
 
     if not final_video_ready:
+        log_cb(f"[{voice_name}] ⚠️ Không gắn được bìa, xuất video gốc không bìa. {frame_error[:120]}")
         shutil.copy2(temp_main_mp4, out_file)
         final_video_ready = os.path.exists(out_file) and os.path.getsize(out_file) > 0
 

@@ -70,7 +70,7 @@ class BRollTab:
         # ... (Dưới nút Xóa Project ở Cột Trái)
         tk.Button(left_frame, text="🗑️ Xóa Project", bg="#e74c3c", fg="white", font=("Arial", 9, "bold"), command=self.delete_project).pack(fill="x", padx=5, pady=(0, 5))
 
-        tk.Button(left_frame, text="🔥 BƠM DATA SANG DB", bg="#8e44ad", fg="white", font=("Arial", 9, "bold"), command=self.migrate_data_to_sqlite).pack(fill="x", padx=5, pady=(0, 5))
+        tk.Button(left_frame, text="🔥 NHẬP JSON CŨ -> DB", bg="#8e44ad", fg="white", font=("Arial", 9, "bold"), command=self.migrate_data_to_sqlite).pack(fill="x", padx=5, pady=(0, 5))
         
         # [MỚI THÊM] NÚT ĐÓNG BĂNG PROJECT
         self.btn_toggle_proj = tk.Button(left_frame, text="⏸️ Đóng Băng Project", bg="#f39c12", fg="white", font=("Arial", 9, "bold"), command=self.toggle_project_status)
@@ -128,6 +128,14 @@ class BRollTab:
         
         # Nút Máy giặt được nhét chuẩn vào btn_v_fr, đổi màu Tím cho dễ nhận diện
         tk.Button(btn_v_fr, text="🧹 Dọn Tên", bg="#9b59b6", fg="white", font=("Arial", 8, "bold"), width=8, command=self.bulk_rename_project_files).pack()
+
+        # Công tắc chọn engine bóc băng ngay Tab 1
+        fr_mode = tk.Frame(btn_v_fr, bg="#ffffff")
+        fr_mode.pack(fill="x", pady=(8, 0))
+        tk.Label(fr_mode, text="Bóc băng:", bg="#ffffff", font=("Arial", 8, "bold"), fg="#34495e").pack(anchor="w")
+        self.tab1_boc_bang_mode = tk.StringVar(value=self.main_app.config.get("boc_bang_mode", "groq"))
+        tk.Radiobutton(fr_mode, text="Groq", variable=self.tab1_boc_bang_mode, value="groq", bg="#ffffff", font=("Arial", 8), command=self._save_transcription_mode).pack(anchor="w")
+        tk.Radiobutton(fr_mode, text="OhFree", variable=self.tab1_boc_bang_mode, value="ohfree", bg="#ffffff", font=("Arial", 8), command=self._save_transcription_mode).pack(anchor="w")
 
 
         # 2. KHUNG CÔNG CỤ CẢNH TRÁM
@@ -706,9 +714,21 @@ class BRollTab:
         old_name = self.main_app.projects[self.current_project_id]['name']
         new_name = simpledialog.askstring("Đổi tên", "Nhập tên mới:", initialvalue=old_name)
         if new_name and new_name.strip():
-            self.main_app.projects[self.current_project_id]['name'] = new_name.strip()
+            import database
+
+            clean_new_name = new_name.strip()
+            ok, msg = database.rename_project_name_preserve_data(
+                old_name,
+                clean_new_name,
+                profile_name=self.main_app.get_active_profile_name(),
+                project_pid=self.current_project_id,
+            )
+            if not ok:
+                return messagebox.showerror("Không đổi được tên", msg)
+
+            self.main_app.projects[self.current_project_id]['name'] = clean_new_name
             self.main_app.save_projects()
-            self.lbl_proj_name.config(text=new_name.strip())
+            self.lbl_proj_name.config(text=clean_new_name)
             self.refresh_project_list()
             self.tree_proj.selection_set(self.current_project_id)
 
@@ -1007,8 +1027,28 @@ class BRollTab:
                 except OSError:
                     pass
 
+    def _get_transcription_mode(self):
+        if hasattr(self, "tab1_boc_bang_mode"):
+            mode = self.tab1_boc_bang_mode.get().strip().lower()
+            if mode in ("groq", "ohfree"):
+                return mode
+        mode = str(self.main_app.config.get("boc_bang_mode", "groq")).strip().lower()
+        return mode if mode in ("groq", "ohfree") else "groq"
+
+    def _save_transcription_mode(self):
+        mode = self._get_transcription_mode()
+        self.main_app.config["boc_bang_mode"] = mode
+        self.main_app.save_config()
+
+        # Đồng bộ công tắc ở Tab 2 nếu đã khởi tạo
+        try:
+            if hasattr(self.main_app, "tab2") and hasattr(self.main_app.tab2, "boc_bang_mode"):
+                self.main_app.tab2.boc_bang_mode.set(mode)
+        except Exception:
+            pass
+
     def _transcribe_voice_with_auto_trim(self, project_id, voice_name, voice_path):
-        mode = self.main_app.config.get("boc_bang_mode", "groq")
+        mode = self._get_transcription_mode()
         log_cb = lambda msg, pid=project_id: self._log_extract(msg, project_id=pid)
 
         srt_text = ""
@@ -1044,10 +1084,81 @@ class BRollTab:
 
         return srt_text
 
+    def _srt_time_to_seconds(self, time_str):
+        text = str(time_str or "").strip().replace(",", ".")
+        parts = text.split(":")
+        if len(parts) != 3:
+            raise ValueError("Sai định dạng thời gian SRT")
+        hours = float(parts[0])
+        minutes = float(parts[1])
+        seconds = float(parts[2])
+        return hours * 3600 + minutes * 60 + seconds
+
+    def _load_srt_as_timeline_text(self, srt_path):
+        with open(srt_path, "r", encoding="utf-8-sig", errors="ignore") as f:
+            raw = f.read()
+
+        blocks = re.split(r"\n\s*\n", raw.replace("\r\n", "\n").replace("\r", "\n"))
+        lines = []
+
+        for block in blocks:
+            rows = [r.strip() for r in block.split("\n") if r.strip()]
+            if len(rows) < 2:
+                continue
+
+            time_line_idx = 0
+            if re.fullmatch(r"\d+", rows[0]):
+                time_line_idx = 1
+            if time_line_idx >= len(rows):
+                continue
+
+            time_line = rows[time_line_idx]
+            if "-->" not in time_line:
+                continue
+
+            start_raw, end_raw = [x.strip() for x in time_line.split("-->", 1)]
+            try:
+                start_sec = round(self._srt_time_to_seconds(start_raw), 2)
+                end_sec = round(self._srt_time_to_seconds(end_raw), 2)
+            except Exception:
+                continue
+
+            text_rows = rows[time_line_idx + 1:]
+            text = " ".join(t for t in text_rows if t)
+            text = re.sub(r"\s+", " ", text).strip()
+            if not text:
+                continue
+
+            lines.append(f"[{start_sec}s - {end_sec}s]: {text}")
+
+        return "\n".join(lines) + ("\n" if lines else "")
+
     def import_voice(self):
         if not self.current_project_id: return
-        files = filedialog.askopenfilenames(title="Chọn Voice / Video", filetypes=[("Media", "*.mp3 *.wav *.m4a *.mp4 *.mov *.mkv *.avi *.webm *.m4v")])
+        files = filedialog.askopenfilenames(
+            title="Chọn Voice/Video và có thể chọn kèm .srt cùng tên",
+            filetypes=[
+                ("Media + Subtitle", "*.mp3 *.wav *.m4a *.mp4 *.mov *.mkv *.avi *.webm *.m4v *.srt"),
+                ("Media", "*.mp3 *.wav *.m4a *.mp4 *.mov *.mkv *.avi *.webm *.m4v"),
+                ("Subtitle", "*.srt"),
+                ("All files", "*.*"),
+            ],
+        )
         if files:
+            media_files = [
+                f for f in files
+                if os.path.splitext(f)[1].lower() in (".mp3", ".wav", ".m4a", ".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v")
+            ]
+            srt_files = [f for f in files if os.path.splitext(f)[1].lower() == ".srt"]
+
+            if not media_files:
+                return messagebox.showwarning("Chú ý", "Bác cần chọn ít nhất 1 file Voice/Video.")
+
+            srt_map = {
+                os.path.splitext(os.path.basename(srt_path))[0].strip().lower(): srt_path
+                for srt_path in srt_files
+            }
+
             project_id = self.current_project_id
             # Lấy tên Project và gọt sạch sẽ
             proj_name = self.main_app.projects[project_id]['name']
@@ -1063,17 +1174,31 @@ class BRollTab:
             # Lấy con số tiếp theo
             current_idx = self._get_next_index(voice_dir, clean_proj)
             
-            for f in files: 
+            for f in media_files:
                 # Đặt tên mới: vd tuixachda_1.mp3
                 target_name = f"{clean_proj}_{current_idx}.mp3"
                 current_idx += 1 # Đếm lên
                 
                 file_name, file_path = self._save_media_as_mp3(f, voice_dir, target_name)
-                self._set_voice_status(project_id, file_name, "⏳ Chờ bóc SRT")
                 
                 if file_name not in p_data["voice_usage"]:
                     p_data["voice_usage"][file_name] = 0
-                
+
+                src_base = os.path.splitext(os.path.basename(f))[0].strip().lower()
+                matched_srt = srt_map.get(src_base)
+
+                if matched_srt:
+                    try:
+                        srt_text = self._load_srt_as_timeline_text(matched_srt)
+                        if srt_text.strip():
+                            p_data["voice_srt_cache"][file_name] = srt_text
+                            self._set_voice_status(project_id, file_name, "✅ Đã nạp SRT tay")
+                            self._log_extract(f"✅ Đã nhận diện SRT đi kèm cho {file_name}", project_id=project_id)
+                            continue
+                    except Exception as e:
+                        self._log_extract(f"⚠️ File SRT lỗi format ({os.path.basename(matched_srt)}): {str(e)[:120]}", project_id=project_id)
+
+                self._set_voice_status(project_id, file_name, "⏳ Chờ bóc SRT")
                 thread = threading.Thread(target=self._extract_voice_srt_async, args=(project_id, file_name, file_path), daemon=True)
                 thread.start()
             
@@ -1152,7 +1277,7 @@ class BRollTab:
             srt_text = get_transcription(
                 voice_path, 
                 voice_name, 
-                self.main_app.config.get("boc_bang_mode", "groq"), 
+                self._get_transcription_mode(), 
                 self.main_app.config, 
                 lambda msg: self._log_extract(msg, project_id=project_id)
             )
@@ -2175,87 +2300,94 @@ class BRollTab:
         import database
         from tkinter import messagebox
         import json
-        
+        from paths import get_projects_list_file
+
         if not messagebox.askyesno("Xác nhận", "Sếp có muốn hút toàn bộ dữ liệu từ file JSON cũ sang Database mới không?"):
             return
-            
+
         try:
-            # ============================================================
-            # [MỚI] Bọc toàn bộ migrate process vào db_lock để tránh race condition
-            # ============================================================
-            with database.db_lock:
-                conn = database.get_connection()
-                cursor = conn.cursor()
-                
-                total_proj, total_voices, total_brolls = 0, 0, 0
-                
-                for pid, proj_info in self.main_app.projects.items():
-                    proj_name = proj_info.get('name', 'Unknown')
-                    if proj_name == 'Unknown': continue
-                    
-                    p_data = self.main_app.get_project_data(pid)
-                    
-                    # --- 1. BƠM PROJECT ---
-                    prod_name = p_data.get("product_name", "")
-                    context = p_data.get("product_context", "")
-                    out_stock = 1 if p_data.get("shopee_out_of_stock", False) else 0
-                    links = json.dumps(p_data.get("product_links", []))
-                    ref1 = p_data.get("ref_img_1", "")
-                    ref2 = p_data.get("ref_img_2", "")
-                    status = proj_info.get("status", "active")
-                    
-                    cursor.execute("SELECT id FROM projects WHERE name = ?", (proj_name,))
-                    row = cursor.fetchone()
-                    if row:
-                        db_proj_id = row['id']
-                        cursor.execute('''UPDATE projects SET 
-                            product_name=?, product_context=?, shopee_out_of_stock=?, product_links=?, ref_img_1=?, ref_img_2=?, status=? 
-                            WHERE id=?''', (prod_name, context, out_stock, links, ref1, ref2, status, db_proj_id))
-                    else:
-                        cursor.execute('''INSERT INTO projects 
-                            (name, product_name, product_context, shopee_out_of_stock, product_links, ref_img_1, ref_img_2, status) 
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)''', 
-                            (proj_name, prod_name, context, out_stock, links, ref1, ref2, status))
-                        db_proj_id = cursor.lastrowid
-                    total_proj += 1
-                    
-                    # --- 2. BƠM VOICE ---
-                    voice_usage = p_data.get("voice_usage", {})
-                    voice_srt = p_data.get("voice_srt_cache", {})
-                    for v_name, usage in voice_usage.items():
-                        srt = voice_srt.get(v_name, "")
-                        cursor.execute('''INSERT OR IGNORE INTO voices (project_id, file_name, usage_count, srt_cache)
-                            VALUES (?, ?, ?, ?)''', (db_proj_id, v_name, int(usage), srt))
-                        total_voices += 1
-                    
-                    # --- 3. BƠM BROLL (ĐANG DÙNG) ---
-                    videos = p_data.get("videos", {})
-                    for b_name, b_info in videos.items():
-                        dur = b_info.get("duration", 0)
-                        desc = b_info.get("description", "")
-                        usage = b_info.get("usage_count", 0)
-                        keep_audio = 1 if b_info.get("keep_audio", False) else 0
-                        
-                        cursor.execute('''INSERT OR REPLACE INTO brolls (project_id, file_name, duration, description, usage_count, keep_audio, status)
-                            VALUES (?, ?, ?, ?, ?, ?, 'active')''', (db_proj_id, b_name, dur, desc, int(usage), keep_audio))
-                        total_brolls += 1
-                        
-                    # --- 4. BƠM BROLL (THÙNG RÁC) ---
-                    trash = p_data.get("trash", {})
-                    for b_name, b_info in trash.items():
-                        dur = b_info.get("duration", 0)
-                        desc = b_info.get("description", "")
-                        usage = b_info.get("usage_count", 0)
-                        keep_audio = 1 if b_info.get("keep_audio", False) else 0
-                        
-                        cursor.execute('''INSERT OR REPLACE INTO brolls (project_id, file_name, duration, description, usage_count, keep_audio, status)
-                            VALUES (?, ?, ?, ?, ?, ?, 'trash')''', (db_proj_id, b_name, dur, desc, int(usage), keep_audio))
-                        total_brolls += 1
-                
-                conn.commit()
-                conn.close()
-            
-            messagebox.showinfo("Thành công", f"🎉 ĐÃ HÚT SẠCH DỮ LIỆU TỪ JSON!\n\n- {total_proj} Projects\n- {total_voices} file Voice\n- {total_brolls} file Cảnh Trám (cả Active lẫn Trash)")
-            
+            profile_name = self.main_app.get_active_profile_name()
+            legacy_projects_file = get_projects_list_file(profile_name)
+
+            legacy_projects = {}
+            if os.path.exists(legacy_projects_file):
+                try:
+                    with open(legacy_projects_file, "r", encoding="utf-8") as f:
+                        loaded = json.load(f)
+                    if isinstance(loaded, dict):
+                        legacy_projects = loaded
+                except Exception:
+                    legacy_projects = {}
+
+            if not legacy_projects:
+                return messagebox.showinfo(
+                    "Không có dữ liệu cũ",
+                    "Không tìm thấy projects_list.json hợp lệ để nhập.\n\nHiện tool đã chạy DB-first nên không cần bơm nếu dữ liệu đã nằm trong DB.",
+                )
+
+            total_proj, total_voices, total_brolls = 0, 0, 0
+            imported_projects = {}
+
+            for pid, proj_info in legacy_projects.items():
+                proj_name = str((proj_info or {}).get("name", "")).strip()
+                if not proj_name:
+                    continue
+
+                project_dir = self.main_app.get_proj_dir(pid, profile_name)
+                data_file = os.path.join(project_dir, "project_data.json")
+
+                payload = {
+                    "videos": {},
+                    "trash": {},
+                    "timeline": [],
+                    "product_context": "",
+                    "product_name": "",
+                    "shopee_out_of_stock": False,
+                    "product_links": ["", "", "", "", "", ""],
+                    "ref_img_1": "",
+                    "ref_img_2": "",
+                    "voice_usage": {},
+                    "voice_srt_cache": {},
+                }
+
+                if os.path.exists(data_file):
+                    try:
+                        with open(data_file, "r", encoding="utf-8") as f:
+                            loaded_payload = json.load(f)
+                        if isinstance(loaded_payload, dict):
+                            payload.update(loaded_payload)
+                    except Exception:
+                        pass
+
+                database.save_project_payload(proj_name, payload, (proj_info or {}).get("status", "active"))
+
+                imported_projects[str(pid)] = {
+                    "name": proj_name,
+                    "created_at": float((proj_info or {}).get("created_at") or 0),
+                    "status": (proj_info or {}).get("status", "active"),
+                }
+
+                total_proj += 1
+                total_voices += len((payload.get("voice_usage", {}) or {}))
+                total_brolls += len((payload.get("videos", {}) or {})) + len((payload.get("trash", {}) or {}))
+
+            # Đồng bộ danh sách project theo profile vào DB mapping
+            database.upsert_app_projects(profile_name, imported_projects)
+            self.main_app.projects = database.get_app_projects(profile_name)
+
+            messagebox.showinfo(
+                "Thành công",
+                f"🎉 ĐÃ HÚT SẠCH DỮ LIỆU TỪ JSON CŨ VÀO DATABASE!\n\n"
+                f"- {total_proj} Projects\n"
+                f"- {total_voices} file Voice\n"
+                f"- {total_brolls} file Cảnh Trám (Active/Trash)",
+            )
+
+            self.refresh_project_list()
+            self.main_app.tab2.update_combo_projects()
+            if self.current_project_id:
+                self.load_voices()
+                self.render_video_list(reset_pages=True)
+
         except Exception as e:
             messagebox.showerror("Lỗi", f"Có lỗi xảy ra: {e}")

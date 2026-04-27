@@ -2,6 +2,7 @@ import os
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import shutil
+import glob
 import unicodedata
 from datetime import datetime
 import socket
@@ -342,25 +343,77 @@ class ManagerTab:
 
         import database
         deleted_paths = [self.tree.item(i)['values'][3] for i in selected]
-        deleted_video_names = [os.path.basename(path) for path in deleted_paths]
 
+        deletable_db_paths = []
+        failed_items = []
         for path in deleted_paths:
-            try:
-                if os.path.exists(path):
-                    os.remove(path)
-            except Exception as e:
-                print(f"Không xóa được {path}: {e}")
+            ok, err = self._delete_video_file_with_fallback(path)
+            if ok:
+                deletable_db_paths.append(path)
+            else:
+                failed_items.append((path, err))
 
-        database.delete_rendered_videos(deleted_paths)
+        if deletable_db_paths:
+            database.delete_rendered_videos(deletable_db_paths)
 
         try:
-            delete_shopee_jobs(deleted_video_names, config=self.main_app.config)
+            success_names = [os.path.basename(p) for p in deletable_db_paths]
+            if success_names:
+                delete_shopee_jobs(success_names, config=self.main_app.config)
             if hasattr(self.main_app, "tab11"):
                 self.main_app.root.after(0, self.main_app.tab11.refresh_jobs_preview)
         except Exception as e:
             print(f"Không xóa được job Shopee tương ứng: {e}")
 
         self.load_excel_data()
+
+        if failed_items:
+            preview = "\n".join([f"- {os.path.basename(p)}: {msg}" for p, msg in failed_items[:8]])
+            more = "" if len(failed_items) <= 8 else f"\n... và {len(failed_items)-8} file khác"
+            messagebox.showwarning(
+                "Xóa chưa trọn",
+                "Một số file chưa xóa được khỏi Kho Video (thường do đang mở/đang dùng).\n\n"
+                f"{preview}{more}\n\n"
+                "Tool giữ lại các dòng này trong DB để bác xử lý lại sau."
+            )
+
+    def _delete_video_file_with_fallback(self, raw_path):
+        """Xóa file video theo nhiều đường dẫn dự phòng; trả về (thành công, lỗi)."""
+        from main import GLOBAL_OUT_DIR
+
+        raw_path = str(raw_path or "").strip()
+        if not raw_path:
+            return False, "Đường dẫn rỗng"
+
+        normalized = os.path.normpath(raw_path)
+        base_name = os.path.basename(normalized)
+        candidates = []
+
+        def _add_candidate(p):
+            p = os.path.normpath(p)
+            if p and p not in candidates:
+                candidates.append(p)
+
+        _add_candidate(normalized)
+        _add_candidate(os.path.abspath(normalized))
+        if base_name:
+            _add_candidate(os.path.join(GLOBAL_OUT_DIR, base_name))
+            for p in glob.glob(os.path.join(GLOBAL_OUT_DIR, "**", base_name), recursive=True):
+                _add_candidate(p)
+
+        existed_any = False
+        for candidate in candidates:
+            try:
+                if os.path.exists(candidate):
+                    existed_any = True
+                    os.remove(candidate)
+            except Exception as e:
+                return False, str(e)
+
+        # Nếu không tìm thấy file ở đâu, coi như đã được xóa khỏi đĩa.
+        if not existed_any:
+            return True, ""
+        return True, ""
 
     def open_folder(self):
         from main import GLOBAL_OUT_DIR
@@ -475,12 +528,15 @@ class ManagerTab:
                         if 'file' in query:
                             file_name = query['file'][0]
                             file_path = os.path.normpath(os.path.join(abs_dir, file_name))
+                            removed_ok = True
                             try:
-                                if os.path.exists(file_path): os.remove(file_path)
-                            except: pass
+                                removed_ok, _ = tab_instance._delete_video_file_with_fallback(file_path)
+                            except:
+                                removed_ok = False
                             try:
                                 import database
-                                database.delete_rendered_videos([file_path])
+                                if removed_ok:
+                                    database.delete_rendered_videos([file_path])
                             except: pass
                             try: tab_instance.main_app.root.after(0, tab_instance.load_excel_data)
                             except: pass

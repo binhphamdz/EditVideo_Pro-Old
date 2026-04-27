@@ -476,31 +476,19 @@ class MainApp:
         return get_all_profiles()
 
     def load_projects_for_profile(self, profile_name):
-        target_file = get_projects_list_file(profile_name)
         try:
-            with open(target_file, "r", encoding="utf-8") as f:
-                return json.load(f)
+            import database
+            projects = database.get_app_projects(profile_name)
+            return projects if isinstance(projects, dict) else {}
         except Exception:
             return {}
 
     def save_projects_for_profile(self, profile_name, projects_data):
-        import shutil
-
-        target_file = get_projects_list_file(profile_name)
-        backup_file = target_file.replace(".json", "_backup.json")
-
-        with self.json_lock:
-            if os.path.exists(target_file) and os.path.getsize(target_file) > 0:
-                try:
-                    shutil.copy2(target_file, backup_file)
-                except Exception:
-                    pass
-
-            try:
-                with open(target_file, "w", encoding="utf-8") as f:
-                    json.dump(projects_data, f, indent=4, ensure_ascii=False)
-            except Exception:
-                pass
+        try:
+            import database
+            database.upsert_app_projects(profile_name, projects_data)
+        except Exception:
+            pass
 
     def move_project_to_profile(self, project_id, target_profile):
         import shutil
@@ -557,58 +545,43 @@ class MainApp:
         except: pass
 
     def load_projects(self):
-        try:
-            with open(PROJECTS_LIST_FILE, "r", encoding="utf-8") as f: return json.load(f)
-        except: return {}
+        return self.load_projects_for_profile(self.get_active_profile_name())
 
     # =======================================================
     # [NÂNG CẤP 1] - LƯU PROJECT CÓ BACKUP VÀ Ổ KHÓA
     # =======================================================
     def save_projects(self):
-        import shutil
-        backup_file = PROJECTS_LIST_FILE.replace(".json", "_backup.json")
-        
-        with self.json_lock: # Bật khóa an toàn
-            # 1. Tạo file Backup
-            if os.path.exists(PROJECTS_LIST_FILE) and os.path.getsize(PROJECTS_LIST_FILE) > 0:
-                try: shutil.copy2(PROJECTS_LIST_FILE, backup_file)
-                except: pass
-            
-            # 2. Ghi file chính
-            try:
-                with open(PROJECTS_LIST_FILE, "w", encoding="utf-8") as f: 
-                    json.dump(self.projects, f, indent=4)
-            except: pass
+        try:
+            import database
+            database.upsert_app_projects(self.get_active_profile_name(), self.projects)
+
+            # Đồng bộ tên + trạng thái project sang bảng projects nghiệp vụ.
+            with database.db_lock:
+                conn = database.get_connection()
+                cursor = conn.cursor()
+                for _, pdata in (self.projects or {}).items():
+                    proj_name = str((pdata or {}).get("name", "")).strip()
+                    if not proj_name:
+                        continue
+                    proj_status = str((pdata or {}).get("status", "active") or "active").strip() or "active"
+                    cursor.execute(
+                        """
+                        INSERT INTO projects (name, status)
+                        VALUES (?, ?)
+                        ON CONFLICT(name) DO UPDATE SET status=excluded.status
+                        """,
+                        (proj_name, proj_status),
+                    )
+                conn.commit()
+                conn.close()
+        except Exception:
+            pass
 
     # =======================================================
     # [NÂNG CẤP 2] - ĐỌC DATA CŨNG PHẢI ĐÓNG KHÓA (CHỐNG MẤT ĐIỂM)
     # =======================================================
     def get_project_data(self, pid):
-        data_file = os.path.join(self.get_proj_dir(pid), "project_data.json")
-        backup_file = os.path.join(self.get_proj_dir(pid), "project_data_backup.json")
-        
-        with self.json_lock: # Khóa lại không cho ai ghi lúc mình đang đọc
-            # 1. Thử đọc file chính trước
-            if os.path.exists(data_file):
-                try:
-                    with open(data_file, 'r', encoding='utf-8') as f: 
-                        return json.load(f)
-                except Exception as e:
-                    print(f"⚠️ Cảnh báo: File dự án chính bị hỏng ({e}). Đang kích hoạt Backup...")
-                    
-                    # 2. Nếu file chính hỏng (do sập nguồn), lôi file Backup ra xài
-                    if os.path.exists(backup_file):
-                        try:
-                            with open(backup_file, 'r', encoding='utf-8') as f: 
-                                data = json.load(f)
-                                
-                                # Khôi phục đè ngược lại file chính luôn
-                                with open(data_file, 'w', encoding='utf-8') as f_recover:
-                                    json.dump(data, f_recover, indent=4)
-                                return data
-                        except: pass
-
-        return {
+        default_data = {
             "videos": {},
             "trash": {},
             "timeline": [],
@@ -616,30 +589,37 @@ class MainApp:
             "product_name": "",
             "shopee_out_of_stock": False,
             "product_links": ["", "", "", "", "", ""],
+            "ref_img_1": "",
+            "ref_img_2": "",
+            "voice_usage": {},
+            "voice_srt_cache": {},
         }
+
+        proj_meta = (self.projects or {}).get(pid, {})
+        proj_name = str((proj_meta or {}).get("name", "")).strip()
+        if not proj_name:
+            return default_data
+
+        try:
+            import database
+            return database.get_project_payload(proj_name)
+        except Exception:
+            return default_data
 
     # =======================================================
     # [NÂNG CẤP 3] - GHI DATA CHÍNH CHU TRỌN BỘ Ổ KHÓA + BACKUP
     # =======================================================
     def save_project_data(self, pid, data):
-        import shutil
-        data_file = os.path.join(self.get_proj_dir(pid), "project_data.json")
-        backup_file = os.path.join(self.get_proj_dir(pid), "project_data_backup.json")
-        
-        with self.json_lock: # Bật khóa an toàn
-            # 1. TẠO FILE BACKUP
-            if os.path.exists(data_file) and os.path.getsize(data_file) > 0:
-                try:
-                    shutil.copy2(data_file, backup_file)
-                except:
-                    pass
-                    
-            # 2. GHI ĐÈ FILE CHÍNH
-            try:
-                with open(data_file, 'w', encoding='utf-8') as f: 
-                    json.dump(data, f, indent=4)
-            except Exception as e:
-                print(f"Lỗi khi lưu data: {e}")
+        proj_meta = (self.projects or {}).get(pid, {})
+        proj_name = str((proj_meta or {}).get("name", "")).strip()
+        if not proj_name:
+            return
+
+        try:
+            import database
+            database.save_project_payload(proj_name, data, proj_meta.get("status", "active"))
+        except Exception as e:
+            print(f"Lỗi khi lưu data vào DB: {e}")
 
     def setup_ui(self):
         # ... (Từ đoạn này sếp giữ nguyên code cũ của sếp nhé) ...
