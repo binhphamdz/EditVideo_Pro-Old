@@ -29,6 +29,9 @@ wheels/
 # Workspace_Data chứa projects, voices, videos
 Workspace_Data/
 
+# ================ BROWSER PROFILE ================
+Browser_Profile/
+
 # ================ MEDIA FILES ================
 *.mp4
 *.mov
