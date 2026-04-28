@@ -72,6 +72,7 @@ from bot_telegram import TelegramBotManager
 from tab9_script_analysis import ScriptAnalysisTab
 from tab10_config import ConfigTab
 from tab12_voice import TabVoice
+from tab13_web_auto_post import WebAutoPostTab
 
 # [ĐÃ SỬA] DÙNG BASE_PATH ĐỂ TẠO THƯ MỤC CẠNH FILE EXE CHỨ KHÔNG PHẢI TRONG TEMP
 WORKSPACE_DIR = ""
@@ -222,6 +223,8 @@ class MainApp:
         if hasattr(self, "tab11"):
             self.tab11.runtime_csv_path = None
             self.tab11.on_tab_activated()
+        if hasattr(self, "tab13"):
+            self.tab13.on_tab_activated()
 
         if show_notice:
             messagebox.showinfo("Đổi tài khoản", f"Đã chuyển sang không gian làm việc: {self.active_profile}")
@@ -301,6 +304,8 @@ class MainApp:
         if hasattr(self, "tab11"):
             self.tab11.runtime_csv_path = None
             self.tab11.on_tab_activated()
+        if hasattr(self, "tab13"):
+            self.tab13.on_tab_activated()
 
         return True, f"Đã đổi tên tài khoản thành: {new_profile_name}"
 
@@ -465,6 +470,8 @@ class MainApp:
             self.tab4.load_excel_data()
         if hasattr(self, "tab11"):
             self.tab11.on_tab_activated()
+        if hasattr(self, "tab13"):
+            self.tab13.on_tab_activated()
 
         moved_count = len(moved_names)
         messagebox.showinfo("Đã xóa tài khoản", f"Đã xóa tài khoản '{selected_profile}'.\n\nĐã chuyển {moved_count} project sang mục '{guest_profile}'.")
@@ -649,18 +656,21 @@ class MainApp:
         self.frame_tab4 = tk.Frame(self.notebook, bg="#f4f6f9") 
         self.frame_tab5 = tk.Frame(self.notebook, bg="#f4f6f9")
         self.frame_tab11 = tk.Frame(self.notebook, bg="#f4f6f9")
+        self.frame_tab13 = tk.Frame(self.notebook, bg="#f4f6f9")
         
         self.notebook.add(self.frame_tab1, text=" 📂KHO CẢNH TRÁM ")
         self.notebook.add(self.frame_tab2, text=" 🚀 EDIT VIDEO ĐA LUỒNG ")
         self.notebook.add(self.frame_tab4, text=" 📊 QUẢN LÝ VIDEO ")
         self.notebook.add(self.frame_tab5, text=" 📱 QUẢN LÝ ĐIỆN THOẠI ")
         self.notebook.add(self.frame_tab11, text=" 🚜 AUTO ĐĂNG SHOPEE ")
+        self.notebook.add(self.frame_tab13, text=" 🌐 TAB 13 WEB AUTO ")
         
         self.tab1 = BRollTab(self.frame_tab1, self)
         self.tab2 = FacelessTab(self.frame_tab2, self)
         self.tab4 = ManagerTab(self.frame_tab4, self) 
         self.tab5 = PhoneManagerTab(self.frame_tab5, self)
         self.tab11 = AutoPostTab(self.frame_tab11, self)
+        self.tab13 = WebAutoPostTab(self.frame_tab13, self)
 
         # [ĐÃ XÓA] TikTok Upload Tab
 
@@ -710,6 +720,8 @@ class MainApp:
             self.tab5.on_tab_activated()
         if hasattr(self, 'tab11'):
             self.tab11.on_tab_activated()
+        if hasattr(self, 'tab13'):
+            self.tab13.on_tab_activated()
 
     # =================================================================
     # HÀM CẦU NỐI (PROXY) TỪ TAB 8 SANG BOT MANAGER

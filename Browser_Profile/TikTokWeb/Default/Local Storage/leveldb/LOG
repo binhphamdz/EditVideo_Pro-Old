@@ -1,0 +1,14 @@
+2026/04/28-15:10:12.900 5350 Reusing MANIFEST C:\Users\Binh\Desktop\EditVideo_Pro - DeskTop\Browser_Profile\TikTokWeb\Default\Local Storage\leveldb/MANIFEST-000001
+2026/04/28-15:10:12.903 5350 Recovering log #12
+2026/04/28-15:10:12.904 5350 Reusing old log C:\Users\Binh\Desktop\EditVideo_Pro - DeskTop\Browser_Profile\TikTokWeb\Default\Local Storage\leveldb/000012.log 
+2026/04/28-15:10:24.708 1d10 Level-0 table #16: started
+2026/04/28-15:10:24.711 1d10 Level-0 table #16: 26062 bytes OK
+2026/04/28-15:10:24.712 1d10 Delete type=0 #12
+2026/04/28-15:10:24.712 1d10 Compacting 4@0 + 0@1 files
+2026/04/28-15:10:24.716 1d10 Generated table #17@0: 102 keys, 123430 bytes
+2026/04/28-15:10:24.716 1d10 Compacted 4@0 + 0@1 files => 123430 bytes
+2026/04/28-15:10:24.716 1d10 compacted to: files[ 0 1 1 0 0 0 0 ]
+2026/04/28-15:10:24.717 1d10 Delete type=2 #7
+2026/04/28-15:10:24.717 1d10 Delete type=2 #10
+2026/04/28-15:10:24.717 1d10 Delete type=2 #13
+2026/04/28-15:10:24.717 1d10 Delete type=2 #16
