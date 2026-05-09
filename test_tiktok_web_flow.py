@@ -190,9 +190,8 @@ def phase_upload_and_post(page, video_path: str, caption: str, timeout_ms: int, 
     )
     time.sleep(1)
 
-    # 3. Trong popup Add link: chọn Products nếu chưa chọn, ấn Next/Tiếp đúng modal (hỗ trợ cả tiếng Việt/Anh)
+    # 3. Trong popup Add link: chọn Products nếu chưa chọn, ấn Next/Tiếp đúng modal
     try:
-        # Kiểm tra nếu đã đúng loại liên kết thì không click nữa
         modal_titles = ["Add link", "Thêm liên kết"]
         modal = None
         for title in modal_titles:
@@ -202,12 +201,10 @@ def phase_upload_and_post(page, video_path: str, caption: str, timeout_ms: int, 
                 break
         if modal is None:
             raise RuntimeError("Không tìm thấy modal Thêm liên kết/Add link!")
-        # Kiểm tra text đang chọn
         selected = modal.locator("button.TUXSelect-button .select-option-label").first
         selected_text = selected.inner_text(timeout=timeout_ms).strip().lower()
         if selected_text not in ["products", "sản phẩm"]:
             selected.click(timeout=timeout_ms)
-            # Chọn lại đúng option
             option = modal.locator(".select-option-label:has-text('Products'), .select-option-label:has-text('Sản phẩm')").first
             option.click(timeout=timeout_ms)
             log("Đã chọn lại loại liên kết Products/Sản phẩm trong Add link popup")
@@ -216,7 +213,7 @@ def phase_upload_and_post(page, video_path: str, caption: str, timeout_ms: int, 
             log("Đã đúng loại liên kết Products/Sản phẩm, không cần chọn lại")
     except Exception:
         pass
-    # Chờ nút Next/Tiếp trong modal đúng title
+    
     modal = None
     for title in ["Add link", "Thêm liên kết"]:
         m = page.locator(f".TUXModal[title='{title}']")
@@ -273,38 +270,88 @@ def phase_upload_and_post(page, video_path: str, caption: str, timeout_ms: int, 
         log("SKIP POST mode: da dung truoc buoc Dang")
         return
 
-    # Liên tục scroll và kiểm tra nút Đăng khả dụng, thấy là bấm ngay
+    # ================================================================
+    # [BẢN ĐỘ MỚI] - FIX LỖI KHÔNG SCROLL ĐƯỢC VÀ KHÔNG CLICK ĐƯỢC NÚT ĐĂNG
+    # ================================================================
     log("Scroll và kiểm tra nút Đăng...")
     max_wait = 12 * 60  # 12 phút
     waited = 0
-    post_btn = page.locator('button[data-e2e="post_video_button"]:not([aria-disabled="true"]):not([data-disabled="true"])')
+    # Selector chuẩn của nút Đăng (lấy nút cuối cùng nếu bị trùng)
+    post_btn = page.locator('button[data-e2e="post_video_button"]:not([aria-disabled="true"]):not([data-disabled="true"])').last
+    
     while waited < max_wait:
         try:
-            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            # DÙNG PHÍM CỨNG ĐỂ CUỘN TRANG (Phá CSS Overflow Hidden của TikTok)
+            page.keyboard.press("PageDown")
         except Exception:
             pass
+            
         time.sleep(1)
+        
+        # Thấy nút Đăng sáng lên là dừng cuộn
         if post_btn.count() > 0 and post_btn.is_enabled():
+            log("🎯 Nút Đăng đã sáng lên, chuẩn bị nã đạn!")
             break
+            
         waited += 1
     else:
-        raise RuntimeError("Không tìm thấy nút Đăng khả dụng!")
+        raise RuntimeError("Không tìm thấy nút Đăng khả dụng (Có thể do mạng lag hoặc lỗi bản quyền)!")
 
-    click_any(
-        page,
-        [
-            "button:has-text('Đăng')",
-            "button:has-text('Dang')",
-            "button:has-text('Post')",
-            "button:has-text('Publish')",
-            "text=Đăng",
-            "text=Dang",
-            "text=Post",
-        ],
-        timeout_ms,
-    )
-    log("PHASE 2 DONE - Đã bấm Đăng, chờ load...")
-    # Chờ trang load sau khi đăng (ví dụ: chờ nút Đăng biến mất hoặc chờ 10s)
+    # CHỐT HẠ: ÉP CLICK BẰNG MỌI GIÁ
+    try:
+        # Bắt web tự kéo nút Đăng ra giữa màn hình
+        post_btn.scroll_into_view_if_needed()
+        time.sleep(1)
+        
+        log("-> Đang ép Click vào nút Đăng...")
+        try:
+            # Level 1: Force Click (Xuyên mờ)
+            post_btn.click(force=True, timeout=5000)
+            log("✅ Bấm nút Đăng thành công (Force Click)!")
+        except Exception as e1:
+            log("⚠️ Click thường bị chặn, đang kích hoạt búa tạ JavaScript...")
+            # Level 2: JavaScript Injection (Chọc thẳng vào DOM)
+            post_btn.evaluate("node => node.click()")
+            log("✅ Bấm nút Đăng thành công (JavaScript)!")
+            
+        # ================================================================
+        # [BẢN ĐỘ MỚI] - ĐẤM VỠ POPUP CẢNH BÁO BẢN QUYỀN
+        # ================================================================
+        log("-> Đang kiểm tra xem có bị hỏi 'Tiếp tục đăng / Post now' không...")
+        time.sleep(2) # Chờ 2s xem cái popup lề mề nó có nảy lên không
+        
+        # Danh sách các nút ép đăng (Hỗ trợ cả giao diện tiếng Anh và tiếng Việt)
+        post_now_selectors = [
+            "button.TUXButton--primary:has-text('Post now')",
+            "button.TUXButton--primary:has-text('Đăng ngay')",
+            "button.TUXButton--primary:has-text('Continue')",
+            "button.TUXButton--primary:has-text('Tiếp tục đăng')"
+        ]
+        
+        handled_popup = False
+        for sel in post_now_selectors:
+            try:
+                btn_popup = page.locator(sel).first
+                if btn_popup.count() > 0 and btn_popup.is_visible():
+                    log(f"⚠️ Bắt quả tang Popup Bản quyền! Đang ấn Xuyên thủng...")
+                    btn_popup.click(timeout=3000)
+                    log("✅ Đã đấm xong Popup, video chính thức lên thớt!")
+                    handled_popup = True
+                    break
+            except Exception:
+                continue
+                
+        if not handled_popup:
+            log("-> Không thấy popup bản quyền (hoặc video đã check xong nhanh), luồng đi thẳng!")
+        # ================================================================
+
+    except Exception as e:
+        raise RuntimeError(f"❌ Nút Đăng hiện ra rồi nhưng không thể click được: {e}")
+
+    log("PHASE 2 DONE - Đã chốt Đăng bài, chờ load...")
+    # ================================================================
+
+    # Chờ trang load sau khi đăng (ví dụ: chờ nút Đăng biến mất)
     for _ in range(30):
         if post_btn.count() == 0:
             break

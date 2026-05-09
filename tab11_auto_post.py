@@ -15,6 +15,7 @@ from shopee_export import (
     load_shopee_jobs,
     normalize_shopee_product_link,
     resolve_shopee_video_path,
+    delete_shopee_jobs_by_names,
     update_shopee_status,
 )
 
@@ -118,20 +119,23 @@ class AutoPostTab:
         summary_bar.pack(fill="x", pady=(0, 8))
         self.lbl_job_summary = tk.Label(summary_bar, text="Chưa nạp file job.", bg="#ffffff", fg="#8e44ad", font=("Arial", 10, "bold"))
         self.lbl_job_summary.pack(side="left")
-        tk.Button(summary_bar, text="🔄 Làm mới danh sách", bg="#34495e", fg="white", font=("Arial", 9, "bold"), command=self.refresh_jobs_preview).pack(side="right")
+        tk.Button(summary_bar, text="🧹 Dọn job mất file", bg="#c0392b", fg="white", font=("Arial", 9, "bold"), command=self.cleanup_missing_jobs).pack(side="right")
+        tk.Button(summary_bar, text="🔄 Làm mới danh sách", bg="#34495e", fg="white", font=("Arial", 9, "bold"), command=self.refresh_jobs_preview).pack(side="right", padx=(0, 6))
 
-        cols = ("stt", "video", "product", "status", "action")
+        cols = ("stt", "video", "product", "status", "file", "action")
         self.tree_jobs = ttk.Treeview(info_frame, columns=cols, show="headings", height=16)
         self.tree_jobs.heading("stt", text="ID")
         self.tree_jobs.heading("video", text="Tên Video")
         self.tree_jobs.heading("product", text="Tên Sản Phẩm")
         self.tree_jobs.heading("status", text="Trạng thái")
+        self.tree_jobs.heading("file", text="Còn file?")
         self.tree_jobs.heading("action", text="Chức năng")
         
         self.tree_jobs.column("stt", width=50, anchor="center")
         self.tree_jobs.column("video", width=200, anchor="w")
         self.tree_jobs.column("product", width=150, anchor="w")
         self.tree_jobs.column("status", width=120, anchor="center")
+        self.tree_jobs.column("file", width=110, anchor="center")
         self.tree_jobs.column("action", width=100, anchor="center")
         
         self.tree_jobs.tag_configure("done", foreground="#27ae60")
@@ -202,7 +206,7 @@ class AutoPostTab:
         for item in self.tree_jobs.get_children():
             self.tree_jobs.delete(item)
 
-        jobs = load_shopee_jobs()
+        jobs = load_shopee_jobs(profile_name=self.main_app.get_active_profile_name())
         pending_count, processing_count, done_count = 0, 0, 0
 
         for job in jobs:
@@ -212,10 +216,44 @@ class AutoPostTab:
             elif "Lỗi" in status: tag = "error"
             else: tag = "pending"; pending_count += 1
 
-            self.tree_jobs.insert("", "end", values=(job.get("stt", ""), job.get("video_name", ""), job.get("product_name", ""), status, "[ 📤 Bắn Video ]"), tags=(tag,))
+            video_name = str(job.get("video_name", ""))
+            file_path = resolve_shopee_video_path(video_name)
+            file_status = "Còn" if os.path.exists(file_path) else "Mất"
+
+            self.tree_jobs.insert(
+                "",
+                "end",
+                values=(job.get("stt", ""), video_name, job.get("product_name", ""), status, file_status, "[ 📤 Bắn Video ]"),
+                tags=(tag,),
+            )
 
         if not jobs: self.lbl_job_summary.config(text="Database trống. Chưa có job Shopee nào.", fg="#c0392b")
         else: self.lbl_job_summary.config(text=f"Tổng {len(jobs)} job | Chờ đăng: {pending_count} | Đang xử: {processing_count} | Đã đăng: {done_count}", fg="#8e44ad")
+
+    def cleanup_missing_jobs(self):
+        jobs = load_shopee_jobs(profile_name=self.main_app.get_active_profile_name())
+        missing = []
+
+        for job in jobs:
+            video_name = str(job.get("video_name", "")).strip()
+            if not video_name:
+                continue
+            file_path = resolve_shopee_video_path(video_name)
+            if not os.path.exists(file_path):
+                missing.append(video_name)
+
+        if not missing:
+            return messagebox.showinfo("OK", "Không có job nào bị mất file.")
+
+        if not messagebox.askyesno("Xác nhận", f"Sẽ xóa {len(missing)} job bị mất file khỏi Database. Bác đồng ý chứ?"):
+            return
+
+        deleted = delete_shopee_jobs_by_names(missing, profile_name=self.main_app.get_active_profile_name())
+        self.refresh_jobs_preview()
+        if hasattr(self.main_app, "tab13"):
+            self.main_app.root.after(0, self.main_app.tab13.refresh_jobs_preview)
+
+        messagebox.showinfo("Đã dọn", f"Đã xóa {deleted} job bị mất file.")
 
     def show_status_temp(self, msg, color="green", duration=3500):
         if hasattr(self, "manage_status") and self.manage_status.winfo_exists():
@@ -249,7 +287,7 @@ class AutoPostTab:
     def start_auto_post(self):
         if u2 is None: return messagebox.showerror("Thiếu thư viện", "Chưa cài uiautomator2.")
 
-        jobs = load_shopee_jobs()
+        jobs = load_shopee_jobs(profile_name=self.main_app.get_active_profile_name())
         if not jobs: return messagebox.showerror("Trống", "Database chưa có video nào. Hãy xuất video trước.")
 
         selected_devices = self.main_app.tab5.get_selected_devices() if hasattr(self.main_app, "tab5") else []
@@ -278,7 +316,7 @@ class AutoPostTab:
 
         def upd_status(msg): self.parent.after(0, lambda: self.main_app.tab5.update_device_farm_status(device_id, msg))
         def update_job_status(video_name, status):
-            update_shopee_status(video_name, status)
+            update_shopee_status(video_name, status, profile_name=self.main_app.get_active_profile_name())
             self.parent.after(0, self.refresh_jobs_preview)
 
         try:
@@ -305,7 +343,7 @@ class AutoPostTab:
                 if not self.is_farming: break
 
                 upd_status("🔎 Đang bốc job từ Database...")
-                current_job = claim_next_shopee_job(device_id[-4:])
+                current_job = claim_next_shopee_job(device_id[-4:], profile_name=self.main_app.get_active_profile_name())
                 self.parent.after(0, self.refresh_jobs_preview)
                 if not current_job:
                     upd_status("🎉 Hoàn thành! (Hết job) -> Về màn hình chính")

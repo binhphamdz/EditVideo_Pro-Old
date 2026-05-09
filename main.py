@@ -67,6 +67,7 @@ from tab11_auto_post import AutoPostTab
 # from tab5_tiktok import TikTokTab  # [ĐÃ XÓA]
 from tab6_subtitle import SubtitleTab  
 from tab7_script import ScriptTab  
+from tab14_script_writer import ScriptWriterTab
 from tab8_telegram import TelegramTab # <--- IMPORT TAB 8 MỚI
 from bot_telegram import TelegramBotManager
 from tab9_script_analysis import ScriptAnalysisTab
@@ -80,6 +81,78 @@ PROJECTS_LIST_FILE = ""
 GLOBAL_OUT_DIR = ""
 EXCEL_LOG_FILE = ""
 GUEST_PROFILE = "Vãng_Lai"
+
+
+class GlobalLogTab:
+    def __init__(self, parent, main_app):
+        self.parent = parent
+        self.main_app = main_app
+        self.filter_tabs = {}
+        self.filter_providers = {}
+        self.setup_ui()
+
+    def setup_ui(self):
+        container = tk.Frame(self.parent, bg="#f4f6f9")
+        container.pack(fill="both", expand=True, padx=10, pady=10)
+
+        filter_frame = tk.LabelFrame(container, text=" Bộ lọc Log ", font=("Arial", 10, "bold"), bg="#ffffff", padx=10, pady=8)
+        filter_frame.pack(fill="x", pady=(0, 10))
+
+        tab_row = tk.Frame(filter_frame, bg="#ffffff")
+        tab_row.pack(fill="x", pady=(0, 6))
+        tk.Label(tab_row, text="Tabs:", bg="#ffffff", font=("Arial", 9, "bold"), width=8, anchor="w").pack(side="left")
+
+        for tab_key, tab_label in [("tab1", "Tab 1"), ("tab2", "Tab 2"), ("tab7", "Tab 7")]:
+            var = tk.BooleanVar(value=True)
+            chk = tk.Checkbutton(tab_row, text=tab_label, variable=var, bg="#ffffff", command=self.refresh_view)
+            chk.pack(side="left", padx=6)
+            self.filter_tabs[tab_key] = var
+
+        provider_row = tk.Frame(filter_frame, bg="#ffffff")
+        provider_row.pack(fill="x")
+        tk.Label(provider_row, text="Provider:", bg="#ffffff", font=("Arial", 9, "bold"), width=8, anchor="w").pack(side="left")
+
+        for provider_key, label in [
+            ("openai", "OpenAI"),
+            ("shopaikey", "ShopAIKey"),
+            ("kie", "Kie"),
+            ("groq", "Groq"),
+            ("ohfree", "OhFree"),
+            ("system", "System")
+        ]:
+            var = tk.BooleanVar(value=True)
+            chk = tk.Checkbutton(provider_row, text=label, variable=var, bg="#ffffff", command=self.refresh_view)
+            chk.pack(side="left", padx=6)
+            self.filter_providers[provider_key] = var
+
+        self.txt_log = tk.Text(container, bg="#1e272e", fg="#dff9fb", font=("Consolas", 9), state="disabled")
+        self.txt_log.pack(fill="both", expand=True)
+
+    def _passes_filter(self, entry):
+        tab_ok = self.filter_tabs.get(entry.get("tab"), None)
+        provider_ok = self.filter_providers.get(entry.get("provider"), None)
+        if tab_ok is not None and not tab_ok.get():
+            return False
+        if provider_ok is not None and not provider_ok.get():
+            return False
+        return True
+
+    def refresh_view(self):
+        self.txt_log.config(state="normal")
+        self.txt_log.delete("1.0", tk.END)
+        for entry in self.main_app.global_logs:
+            if self._passes_filter(entry):
+                self.txt_log.insert(tk.END, entry.get("line", "") + "\n")
+        self.txt_log.see(tk.END)
+        self.txt_log.config(state="disabled")
+
+    def add_log(self, entry):
+        if not self._passes_filter(entry):
+            return
+        self.txt_log.config(state="normal")
+        self.txt_log.insert(tk.END, entry.get("line", "") + "\n")
+        self.txt_log.see(tk.END)
+        self.txt_log.config(state="disabled")
 
 
 def _ensure_excel_log_file():
@@ -156,6 +229,8 @@ class MainApp:
         # Các biến quản lý Bot Telegram
         self.bot = None
         self.bot_is_running = False
+
+        self.global_logs = []
         
         self.setup_ui()
         
@@ -600,6 +675,7 @@ class MainApp:
             "ref_img_2": "",
             "voice_usage": {},
             "voice_srt_cache": {},
+            "voice_srt_origin": {},
         }
 
         proj_meta = (self.projects or {}).get(pid, {})
@@ -678,6 +754,10 @@ class MainApp:
         self.notebook.add(self.tab7_frame, text="🍲 XÀO KỊCH BẢN")
         self.tab7 = ScriptTab(self.tab7_frame, self)
 
+        self.tab14_frame = tk.Frame(self.notebook, bg="#f4f6f9")
+        self.notebook.add(self.tab14_frame, text=" 📝 VIẾT KỊCH BẢN ")
+        self.tab14 = ScriptWriterTab(self.tab14_frame, self)
+
    
 
         # Thêm khung cho Tab 9
@@ -700,6 +780,10 @@ class MainApp:
         self.notebook.add(self.tab10_frame, text=" ⚙️CẤU HÌNH HỆ THỐNG ")
         self.tab10 = ConfigTab(self.tab10_frame, self)
 
+        self.log_frame = tk.Frame(self.notebook, bg="#f4f6f9")
+        self.notebook.add(self.log_frame, text=" 📜 TỔNG LOG ")
+        self.log_tab = GlobalLogTab(self.log_frame, self)
+
 
 
 
@@ -716,12 +800,25 @@ class MainApp:
         self.tab2.update_combo_projects()
         self.tab1.refresh_project_list()
         self.tab4.load_excel_data() 
+        if hasattr(self, 'tab12'):
+            self.tab12.on_tab_activated()
         if hasattr(self, 'tab5'):
             self.tab5.on_tab_activated()
         if hasattr(self, 'tab11'):
             self.tab11.on_tab_activated()
         if hasattr(self, 'tab13'):
             self.tab13.on_tab_activated()
+        if hasattr(self, 'tab14'):
+            self.tab14.refresh_projects()
+            self.tab14.refresh_styles()
+
+    def log_event(self, tab_key, message, provider="system"):
+        timestamp = time.strftime("%H:%M:%S")
+        line = f"[{timestamp}] [{tab_key}] [{provider}] {message}"
+        entry = {"tab": tab_key, "provider": provider, "line": line}
+        self.global_logs.append(entry)
+        if hasattr(self, "log_tab"):
+            self.root.after(0, lambda: self.log_tab.add_log(entry))
 
     # =================================================================
     # HÀM CẦU NỐI (PROXY) TỪ TAB 8 SANG BOT MANAGER

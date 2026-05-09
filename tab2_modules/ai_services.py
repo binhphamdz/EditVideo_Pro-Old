@@ -305,132 +305,332 @@ def get_transcription(voice_path, voice_name, mode, config, log_cb):
     # Nếu mode lạ thì fallback về Groq
     return _transcribe_with_groq()
 
-def get_director_timeline(voice_text, broll_text, config, log_cb, voice_name, project_context=""):
+# =====================================================
+# AI API HELPER FUNCTIONS FOR DIRECTOR
+# =====================================================
+def _call_ai_director(prompt, config, provider="kie", model="gpt-4o", temperature=0.5, timeout=180, log_cb=None):
+    """
+    Universal AI API caller cho director functions
+    
+    Args:
+        prompt: Prompt text
+        config: Config dict chứa API keys  
+        provider: "kie", "openai" hoặc "shopaikey"
+        model: Model name
+        temperature: Temperature setting
+        timeout: Request timeout
+        
+    Returns:
+        Response text từ AI
+    """
+    import time
+    import requests
+    
+    if provider == "openai":
+        url = "https://api.openai.com/v1/chat/completions"
+        api_key = config.get("openai_key", "")
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": temperature
+        }
+    elif provider == "shopaikey":
+        url = f"https://api.shopaikey.com/v1beta/models/{model}"
+        api_key = config.get("shopaikey_key", "")
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [
+                        {"text": prompt}
+                    ]
+                }
+            ],
+            "generationConfig": {
+                "temperature": temperature
+            }
+        }
+    else:  # kie.ai
+        url = "https://api.kie.ai/gemini-3-flash/v1/chat/completions"
+        api_key = config.get("kie_key", "")
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": temperature,
+            "response_format": {"type": "json_object"}
+        }
+    
+    time.sleep(2)  # Rate limiting
+    res = requests.post(url, headers=headers, json=payload, timeout=timeout)
+    if res.status_code != 200:
+        raise Exception(f"Lỗi {provider.upper()} API: {res.status_code} - {res.text}")
+    
+    if provider == "shopaikey":
+        data = res.json()
+        candidates = data.get("candidates", [])
+        parts = (candidates[0].get("content", {}).get("parts", []) if candidates else [])
+        text = parts[0].get("text", "") if parts else ""
+
+        try:
+            url_usage = "https://api.shopaikey.com/usage/histories"
+            headers_usage = {"x-api-key": api_key}
+            payload_usage = {"page": 1, "page_size": 1}
+            usage_res = requests.post(url_usage, headers=headers_usage, json=payload_usage, timeout=30)
+            if usage_res.status_code == 200:
+                usage_data = usage_res.json() or {}
+                items = (((usage_data.get("data") or {}).get("items")) or [])
+                if items:
+                    item = items[0]
+                    prompt_tokens = item.get("prompt_tokens", 0)
+                    completion_tokens = item.get("completion_tokens", 0)
+                    cost = item.get("cost", 0)
+                    model_name = item.get("model_name", "")
+                    msg = (
+                        f"ShopAIKey usage - prompt: {prompt_tokens}, "
+                        f"completion: {completion_tokens}, cost: ${cost}"
+                    )
+                    if model_name:
+                        msg += f", model: {model_name}"
+                    if log_cb:
+                        log_cb(msg, provider="shopaikey")
+                    else:
+                        print(msg)
+        except Exception:
+            pass
+
+        return text
+
+    return res.json()["choices"][0]["message"]["content"]
+
+
+def _extract_json_from_response(text):
+    """Trích xuất JSON array từ response text và sửa lỗi trailing commas"""
+    import re
+    import json
+    
+    json_str = ""
+    match = re.search(r'```json\s*(\[.*?\])\s*```', text, re.DOTALL | re.IGNORECASE)
+    if match:
+        json_str = match.group(1)
+    else:
+        match = re.search(r'```\s*(\[.*?\])\s*```', text, re.DOTALL)
+        if match:
+            json_str = match.group(1)
+        else:
+            match = re.search(r'\[.*\]', text, re.DOTALL)
+            if match:
+                json_str = match.group(0)
+            else:
+                raise ValueError("Không thể tìm thấy mảng JSON hợp lệ!")
+    
+    # Xóa dấu phẩy thừa ở cuối mảng/object
+    json_str = re.sub(r',\s*([\]}])', r'\1', json_str)
+    return json.loads(json_str)
+
+def get_director_timeline(voice_text, broll_text, config, log_cb, voice_name, project_context="", provider=None, model=None, opening_state=None, broll_usage=None, global_broll_state=None):
     import time
     import requests
     import json
     import re
     
-    # 👉 [SẾP THÊM ĐÚNG DÒNG NÀY VÀO ĐÂY NHÉ] 
-    # Gọi AI Vòng 0 để "Gom câu chống giật" trước khi Đạo diễn Vòng 1 làm việc:
-    voice_text = optimize_voice_timeline_by_ai(voice_text, config, log_cb, voice_name)
-    
-    # =========================================================
-    # Hàm Bóc Vỏ JSON & Sửa Lỗi Vặt (Trailing Commas)
-    # =========================================================
-    def extract_json_array(text):
-        json_str = ""
-        # ... (các đoạn code bên dưới của sếp giữ nguyên 100%) ...
-        json_str = ""
-        match = re.search(r'```json\s*(\[.*?\])\s*```', text, re.DOTALL | re.IGNORECASE)
-        if match: json_str = match.group(1)
+    # Lấy provider và model từ config nếu không được truyền vào
+    if provider is None:
+        provider = config.get("ai_provider", "kie")
+    if model is None:
+        if provider == "shopaikey":
+            model = config.get("gemini_model", "gemini-2.5-flash:generateContent")
+        elif provider == "kie":
+            model = config.get("kie_model", "gemini-3-flash")
         else:
-            match = re.search(r'```\s*(\[.*?\])\s*```', text, re.DOTALL)
-            if match: json_str = match.group(1)
-            else:
-                match = re.search(r'\[.*\]', text, re.DOTALL)
-                if match: json_str = match.group(0)
-                else: raise ValueError("Không thể tìm thấy mảng JSON hợp lệ!")
-                
-        # [BÙA MỚI] Xóa dấu phẩy thừa ở cuối mảng/object (Lỗi AI hay mắc nhất)
-        json_str = re.sub(r',\s*([\]}])', r'\1', json_str)
-        return json.loads(json_str)
-
-    url_kie = "https://api.kie.ai/gemini-3-flash/v1/chat/completions"
-    headers = {"Authorization": f"Bearer {config.get('kie_key')}", "Content-Type": "application/json"}
+            model = config.get("openai_model", "gpt-4o")
+    
+    # Gọi AI Vòng 0 để "Gom câu chống giật" trước khi Đạo diễn Vòng 1 làm việc (có thể tắt).
+    if config.get("enable_v0", True):
+        voice_text = optimize_voice_timeline_by_ai(voice_text, config, log_cb, voice_name, provider, model)
+    else:
+        log_cb(f"[{voice_name}] ⏭️ VÒNG 0 tắt, dùng SRT gốc.")
+    
+    # Sử dụng helper function để extract JSON
+    extract_json_array = _extract_json_from_response
 
     # =========================================================
-    # VÒNG 1: TRỢ LÝ AI (CÓ CƠ CHẾ THỬ LẠI 3 LẦN)
+    # VÒNG 1/2: CHIA CỤM (WINDOWING) + CHẤM ĐIỂM SEMANTIC NHẸ
     # =========================================================
-    # Chuẩn bị bối cảnh dự án để nhét vào prompt
     context_line = f"BỐI CẢNH SẢN PHẨM ĐANG QUẢNG CÁO: {project_context}" if project_context and project_context != "Không có mô tả cụ thể." else ""
-    log_cb(f"[{voice_name}] Đạo diễn AI Vòng 1: Đang phân tích bối cảnh & lọc rổ video...")
+    log_cb(f"[{voice_name}] Đạo diễn AI: Dùng windowing (5-8 câu, overlap 1 câu) để tăng chất lượng.")
     if context_line:
         log_cb(f"[{voice_name}] 🎯 Context: {project_context[:60]}..." if len(project_context) > 60 else f"[{voice_name}] 🎯 Context: {project_context}")
-    
-    prompt_1 = f"""BẠN LÀ ĐẠO DIỄN PHIM CHUYÊN NGHIỆP.
+
+    blocked_openings = []
+    if opening_state and isinstance(opening_state, dict):
+        blocked_openings = list(opening_state.get("used", []) or [])
+    blocked_text = "\nDANH SACH CAM (canh mo dau da dung trong batch): " + ", ".join(blocked_openings) if blocked_openings else ""
+
+    def _chunk_timeline_items(items, min_size=5, max_size=8, overlap=1):
+        chunks = []
+        i = 0
+        total = len(items)
+        while i < total:
+            end = min(i + max_size, total)
+            if end - i < min_size and chunks:
+                chunks[-1].extend(items[i:end])
+                break
+            chunk = items[i:end]
+            chunks.append(chunk)
+            next_i = end - overlap
+            if next_i <= i:
+                next_i = end
+            i = next_i
+        return chunks
+
+    def _filter_broll_text(broll_full, candidates_set):
+        if not broll_full or not candidates_set:
+            return broll_full
+        lines = [line for line in broll_full.splitlines() if any(c in line for c in candidates_set)]
+        return "\n".join(lines) if lines else broll_full
+
+    def _score_candidates(raw_chunk, chunk_broll_text):
+        if not raw_chunk:
+            return raw_chunk
+        candidates_json_str = json.dumps(raw_chunk, ensure_ascii=False, indent=2)
+        prompt_score = f"""Bạn là trợ lý chấm điểm semantic.
 {context_line}
+
+Dưới đây là danh sách câu thoại + candidates cần chấm điểm:
+{candidates_json_str}
+
+Thông tin kho video (mô tả):
+{chunk_broll_text}
+
+YÊU CẦU:
+1. Chấm điểm relevance từng candidate theo thang 1-5.
+2. Sắp xếp candidates theo điểm giảm dần.
+3. Trả về JSON array, giữ nguyên start/end/text.
+4. Thêm key "scores" (mảng điểm) cùng thứ tự với candidates.
+"""
+        try:
+            raw_score = _call_ai_director(prompt_score, config, provider, model, temperature=0.1, log_cb=log_cb)
+            scored = extract_json_array(raw_score)
+            if not isinstance(scored, list):
+                return raw_chunk
+            return scored
+        except Exception:
+            return raw_chunk
+
+    parsed_voice = _parse_timeline_text(voice_text)
+    if parsed_voice:
+        voice_chunks = _chunk_timeline_items(parsed_voice, min_size=5, max_size=8, overlap=1)
+    else:
+        voice_chunks = [None]
+
+    raw_timeline = []
+    final_timeline = []
+    seen_raw_keys = set()
+    seen_final_keys = set()
+
+    for idx, chunk_items in enumerate(voice_chunks, start=1):
+        if chunk_items:
+            chunk_voice_text = _format_timeline_text(chunk_items)
+        else:
+            chunk_voice_text = voice_text
+
+        log_cb(f"[{voice_name}] Vòng 1 (cụm {idx}/{len(voice_chunks)}): Đang lọc rổ video...")
+
+        prompt_1 = f"""BẠN LÀ ĐẠO DIỄN PHIM CHUYÊN NGHIỆP.
+{context_line}
+    {blocked_text}
 
 Dưới đây là Kho video có kèm theo MÔ TẢ CHI TIẾT và [SỐ LẦN ĐÃ DÙNG] của từng cảnh:
 {broll_text}
 
 Nội dung Voice (Giọng đọc):
-{voice_text}
+{chunk_voice_text}
 
-VÒNG 1 - TÌM KIẾM ỨNG VIÊN:
+VÒNG 1 - TÌM KIẾM ỨNG VIÊN (THẮT CHẶT):
 1. Đọc kỹ từng câu thoại.
 2. Chọn ra TỪ 3 ĐẾN 5 VIDEO ỨNG VIÊN phù hợp nhất về mặt ngữ nghĩa VÀ BỐI CẢNH SẢN PHẨM cho câu thoại đó.
 3. Ưu tiên nhặt những video có "Đã dùng: 0 lần" hoặc số lần dùng thấp.
-4. BẮT BUỘC trả về ĐÚNG CÚ PHÁP JSON (có dấu ngoặc kép ở các key):
+4. Với câu mở đầu, TRÁNH các video nằm trong danh sách cấm nếu còn ứng viên khác.
+5. BẮT BUỘC trả về ĐÚNG CÚ PHÁP JSON (có dấu ngoặc kép ở các key):
 [ {{"start": 0.0, "end": 2.5, "text": "...", "candidates": ["vid1.mp4", "vid2.mp4"]}} ]"""
-            
-    payload_1 = {
-        "model": "gemini-3-flash", 
-        "messages": [{"role": "user", "content": prompt_1}], 
-        "temperature": 0.5,
-        "response_format": { "type": "json_object" }  # <-- [ÉP CẤP 2] Bắt buộc nhả JSON
-    }
-    
-    raw_timeline = []
-    for attempt in range(3): # Vòng lặp tái sinh
-        try:
-            time.sleep(2)
-            res_1 = requests.post(url_kie, headers=headers, json=payload_1, timeout=180)
-            if res_1.status_code != 200: raise Exception(f"Lỗi API Vòng 1: {res_1.text}")
-            
-            raw_text_1 = res_1.json()["choices"][0]["message"]["content"]
-            raw_timeline = extract_json_array(raw_text_1)
-            break # Nếu thành công thì thoát vòng lặp ngay
-        except Exception as e:
-            if attempt == 2: raise Exception(f"Lỗi Vòng 1 (Đã thử 3 lần vẫn hỏng JSON): {str(e)}")
-            log_cb(f"[{voice_name}] ⚠️ Vòng 1 AI viết sai chính tả JSON, đang ép AI viết lại (Lần {attempt+2}/3)...")
 
-    # =========================================================
-    # VÒNG 2: TỔNG ĐẠO DIỄN AI (CÓ CƠ CHẾ THỬ LẠI 3 LẦN)
-    # =========================================================
-    log_cb(f"[{voice_name}] Đạo diễn AI Vòng 2: Đo đạc thời lượng & Ghép chuỗi cảnh...")
-    
-    candidates_json_str = json.dumps(raw_timeline, ensure_ascii=False, indent=2)
-    
-    prompt_2 = f"""BẠN LÀ ĐẠO DIỄN PHIM CHUYÊN NGHIỆP.
+        raw_chunk = []
+        for attempt in range(3):
+            try:
+                raw_text_1 = _call_ai_director(prompt_1, config, provider, model, temperature=0.5, log_cb=log_cb)
+                raw_chunk = extract_json_array(raw_text_1)
+                break
+            except Exception as e:
+                if attempt == 2:
+                    raise Exception(f"Lỗi Vòng 1 (Cụm {idx}) sau 3 lần: {str(e)}")
+                log_cb(f"[{voice_name}] ⚠️ Vòng 1 cụm {idx} lỗi JSON, thử lại (Lần {attempt+2}/3)...")
+
+        candidates_set = set()
+        for item in raw_chunk:
+            candidates_set.update(item.get("candidates", []) if isinstance(item.get("candidates", []), list) else [])
+        chunk_broll_text = _filter_broll_text(broll_text, candidates_set)
+        scored_chunk = _score_candidates(raw_chunk, chunk_broll_text)
+
+        log_cb(f"[{voice_name}] Vòng 2 (cụm {idx}/{len(voice_chunks)}): Ghép chuỗi cảnh...")
+        candidates_json_str = json.dumps(scored_chunk, ensure_ascii=False, indent=2)
+
+        prompt_2 = f"""BẠN LÀ ĐẠO DIỄN PHIM CHUYÊN NGHIỆP.
 {context_line}
+    {blocked_text}
 
 Dưới đây là Kịch bản nháp (gồm start/end của câu thoại) và danh sách Video Ứng Viên:
 {candidates_json_str}
 
 Thông tin chi tiết (Độ dài giây, Mô tả, Số lần dùng) của toàn bộ kho:
-{broll_text}
+{chunk_broll_text}
 
-VÒNG 2 - CHỐT HẠ CHUỖI VIDEO:
+VÒNG 2 - CHỐT HẠ CHUỖI VIDEO (THẮT CHẶT):
 1. Tính Thời lượng câu thoại (end - start).
 2. Chọn video từ mảng 'candidates' ưu tiên Số lần dùng thấp nhất.
-3. CHIẾN LƯỢC NỐI CẢNH: 
+3. Với câu mở đầu, tránh video trong danh sách cấm nếu còn lựa chọn khác.
+4. CHIẾN LƯỢC NỐI CẢNH: 
    - Nếu video ngắn hơn thời lượng thoại -> CHỌN THÊM video từ rổ ứng viên ghép vào.
    - Tổng độ dài các video được chọn phải lớn hơn hoặc bằng thời lượng thoại.
    - TUYỆT ĐỐI KHÔNG chọn lặp lại 1 video 2 lần trong cùng 1 câu thoại.
 4. BẮT BUỘC trả về ĐÚNG CÚ PHÁP JSON (có dấu ngoặc kép ở các key):
 [ {{"start": 0.0, "end": 4.5, "text": "...", "video_files": ["vid_1.mp4", "vid_2.mp4"]}} ]"""
 
-    payload_2 = {
-        "model": "gemini-3-flash", 
-        "messages": [{"role": "user", "content": prompt_2}], 
-        "temperature": 0.2,
-        "response_format": { "type": "json_object" }  # <-- [ÉP CẤP 2] Bắt buộc nhả JSON
-    }
-    
-    final_timeline = []
-    for attempt in range(3): # Vòng lặp tái sinh
-        try:
-            time.sleep(2)
-            res_2 = requests.post(url_kie, headers=headers, json=payload_2, timeout=180)
-            if res_2.status_code != 200: raise Exception(f"Lỗi API Vòng 2: {res_2.text}")
-            
-            raw_text_2 = res_2.json()["choices"][0]["message"]["content"]
-            final_timeline = extract_json_array(raw_text_2)
-            break # Thành công thì thoát
-        except Exception as e:
-            if attempt == 2: raise Exception(f"Lỗi Vòng 2 (Đã thử 3 lần vẫn hỏng JSON): {str(e)}")
-            log_cb(f"[{voice_name}] ⚠️ Vòng 2 AI viết sai chính tả JSON, đang ép AI viết lại (Lần {attempt+2}/3)...")
+        final_chunk = []
+        for attempt in range(3):
+            try:
+                raw_text_2 = _call_ai_director(prompt_2, config, provider, model, temperature=0.2, log_cb=log_cb)
+                final_chunk = extract_json_array(raw_text_2)
+                break
+            except Exception as e:
+                if attempt == 2:
+                    raise Exception(f"Lỗi Vòng 2 (Cụm {idx}) sau 3 lần: {str(e)}")
+                log_cb(f"[{voice_name}] ⚠️ Vòng 2 cụm {idx} lỗi JSON, thử lại (Lần {attempt+2}/3)...")
+
+        for item in scored_chunk:
+            key = (item.get("start"), item.get("end"), item.get("text"))
+            if key in seen_raw_keys:
+                continue
+            seen_raw_keys.add(key)
+            raw_timeline.append(item)
+
+        for item in final_chunk:
+            key = (item.get("start"), item.get("end"), item.get("text"))
+            if key in seen_final_keys:
+                continue
+            seen_final_keys.add(key)
+            final_timeline.append(item)
 
     # =========================================================
     # KIỂM TRA BẢO HIỂM LẦN CUỐI (SAFETY NET)
@@ -488,29 +688,131 @@ VÒNG 2 - CHỐT HẠ CHUỖI VIDEO:
     final_timeline = prevent_duplicate_videos(final_timeline, candidates_map)
     log_cb(f"[{voice_name}] ✅ Kiểm tra xong - Video trong video không bị lặp.")
 
+    def usage_score(vid):
+        if isinstance(broll_usage, dict):
+            return int(broll_usage.get(vid, 999999))
+        return 999999
+
+    # =========================================================
+    # [MỚI] ÉP KHÁC NHAU TẤT CẢ CẢNH GIỮA CÁC VIDEO TRONG BATCH
+    # =========================================================
+    if final_timeline and global_broll_state and isinstance(global_broll_state, dict):
+        used_set = global_broll_state.get("used")
+        lock = global_broll_state.get("lock")
+        if isinstance(used_set, set):
+            for row in final_timeline:
+                row_text = row.get("text", "")
+                candidates = candidates_map.get(row_text, [])
+                current_vids = row.get("video_files", [])
+                if not current_vids:
+                    continue
+
+                new_vids = []
+                for vid in current_vids:
+                    with lock:
+                        already_used = vid in used_set
+
+                    if not already_used:
+                        with lock:
+                            used_set.add(vid)
+                        new_vids.append(vid)
+                        continue
+
+                    pool = [c for c in candidates if c not in new_vids]
+                    with lock:
+                        unused_pool = [c for c in pool if c not in used_set]
+
+                    choice_pool = unused_pool if unused_pool else pool
+                    if choice_pool:
+                        selected = sorted(
+                            choice_pool,
+                            key=lambda v: (usage_score(v), candidates.index(v) if v in candidates else 999999)
+                        )[0]
+                        with lock:
+                            used_set.add(selected)
+                        if selected != vid:
+                            log_cb(f"[{voice_name}] ⚠️ Cảnh '{vid}' trùng batch, đổi sang '{selected}'.")
+                        else:
+                            log_cb(f"[{voice_name}] ⚠️ Cảnh '{vid}' trùng batch, không có cảnh mới để đổi.")
+                        new_vids.append(selected)
+                    else:
+                        log_cb(f"[{voice_name}] ⚠️ Cảnh '{vid}' trùng batch, không có ứng viên thay thế.")
+                        new_vids.append(vid)
+
+                row["video_files"] = new_vids if new_vids else current_vids
+
+    # =========================================================
+    # [MỚI] ÉP KHÁC NHAU CẢNH MỞ ĐẦU GIỮA CÁC VIDEO TRONG BATCH
+    # =========================================================
+    if final_timeline and opening_state and isinstance(opening_state, dict):
+        used_set = opening_state.get("used")
+        lock = opening_state.get("lock")
+        global_used = None
+        global_lock = None
+        if global_broll_state and isinstance(global_broll_state, dict):
+            global_used = global_broll_state.get("used")
+            global_lock = global_broll_state.get("lock")
+        if isinstance(used_set, set):
+            first_row = min(final_timeline, key=lambda item: float(item.get("start", 0.0)))
+            row_text = first_row.get("text", "")
+            candidates = candidates_map.get(row_text, [])
+            current = first_row.get("video_files", [])
+            if not candidates:
+                candidates = current
+
+            preferred = [v for v in candidates if v not in used_set]
+            if isinstance(global_used, set):
+                preferred = [v for v in preferred if v not in global_used]
+            pool = preferred if preferred else candidates
+            if pool:
+                selected = sorted(pool, key=lambda v: (usage_score(v), candidates.index(v) if v in candidates else 999999))[0]
+                if lock:
+                    with lock:
+                        if selected not in used_set:
+                            used_set.add(selected)
+                else:
+                    used_set.add(selected)
+
+                if isinstance(global_used, set):
+                    if global_lock:
+                        with global_lock:
+                            if selected not in global_used:
+                                global_used.add(selected)
+                    else:
+                        global_used.add(selected)
+
+                if not current:
+                    first_row["video_files"] = [selected]
+                else:
+                    first_row["video_files"] = [selected] + [v for v in current if v != selected]
+
+                if preferred:
+                    log_cb(f"[{voice_name}] ✅ Cảnh mở đầu ưu tiên khác nhau: {selected}")
+                else:
+                    log_cb(f"[{voice_name}] ⚠️ Hết lựa chọn mới, phải dùng lại cảnh mở đầu: {selected}")
+
     return final_timeline
 
 
-def optimize_voice_timeline_by_ai(raw_voice_text, config, log_cb, voice_name):
+def optimize_voice_timeline_by_ai(raw_voice_text, config, log_cb, voice_name, provider=None, model=None):
     import time
     import requests
     import json
     import re
     
-    # Hàm bóc vỏ JSON (Tái sử dụng lại cho chắc cú)
-    def extract_json_array(text):
-        json_str = ""
-        match = re.search(r'```json\s*(\[.*?\])\s*```', text, re.DOTALL | re.IGNORECASE)
-        if match: json_str = match.group(1)
+    # Lấy provider và model từ config nếu không được truyền vào
+    if provider is None:
+        provider = config.get("ai_provider", "kie")
+    if model is None:
+        if provider == "shopaikey":
+            model = config.get("gemini_model", "gemini-2.5-flash:generateContent")
+        elif provider == "kie":
+            model = config.get("kie_model", "gemini-3-flash")
         else:
-            match = re.search(r'```\s*(\[.*?\])\s*```', text, re.DOTALL)
-            if match: json_str = match.group(1)
-            else:
-                match = re.search(r'\[.*\]', text, re.DOTALL)
-                if match: json_str = match.group(0)
-                else: raise ValueError("Không tìm thấy mảng JSON!")
-        json_str = re.sub(r',\s*([\]}])', r'\1', json_str)
-        return json.loads(json_str)
+            model = config.get("openai_model", "gpt-4o")
+    
+    # Hàm bóc vỏ JSON (Tái sử dụng lại cho chắc cú)
+    extract_json_array = _extract_json_from_response
 
     def merge_micro_segments_only(segments, short_max=3.0):
         if not segments:
@@ -561,14 +863,18 @@ def optimize_voice_timeline_by_ai(raw_voice_text, config, log_cb, voice_name):
     def has_short_segments(segments, short_max=3.0):
         return any((float(item.get("end", 0.0)) - float(item.get("start", 0.0))) <= short_max for item in segments)
 
-    def build_tail_prompt(tail_voice_text):
-        return f"""Đây là phần kịch bản giọng đọc SAU hook đầu đã cố định.
+    def build_tail_prompt(tail_voice_text, hook_context=""):
+        context_block = ""
+        if hook_context:
+            context_block = f"\n\nBỐI CẢNH TRƯỚC ĐÓ (KHÔNG SỬA, CHỈ THAM KHẢO MẠCH):\n{hook_context}"
+        return f"""Đây là phần kịch bản giọng đọc SAU hook đầu đã cố định.{context_block}
 
 YÊU CẦU:
 1. Chỉ làm mượt các đoạn bị ngắn quá, ưu tiên những đoạn khoảng 2-3 giây.
 2. Không cố nối các đoạn dài; nếu hai đoạn khác ý rõ ràng thì giữ riêng.
-3. Không được tạo thêm nội dung mới.
-4. Chỉ trả về JSON array đúng cú pháp, dạng:
+3. Không được tạo thêm nội dung mới. Không đổi ý, không thêm ý.
+4. Giữ đúng THỨ TỰ nội dung. Nếu gộp thì start = đoạn đầu, end = đoạn cuối.
+5. Chỉ trả về JSON array đúng cú pháp, dạng:
 [ {{\"start\": 0.0, \"end\": 3.2, \"text\": \"...\"}} ]
 
 NỘI DUNG CẦN XỬ LÝ:
@@ -578,10 +884,6 @@ NỘI DUNG CẦN XỬ LÝ:
     if parsed_items:
         cache_key = _fingerprint_voice_text(raw_voice_text)
         cache_data = _load_voice_v0_cache(config)
-        cached_text = cache_data.get(cache_key)
-        if isinstance(cached_text, str) and cached_text.strip():
-            log_cb(f"[{voice_name}] VÒNG 0: Dùng cache đã tối ưu, bỏ qua gọi AI.")
-            return cached_text
 
         hook_item = parsed_items[:1]
         hook_text = _format_timeline_text(hook_item)
@@ -590,13 +892,6 @@ NỘI DUNG CẦN XỬ LÝ:
         # Hook đầu giữ nguyên, chỉ nắn lại các đoạn sau nếu chúng thực sự ngắn.
         tail_items = merge_micro_segments_only(tail_items, short_max=3.0)
         tail_text = _format_timeline_text(tail_items)
-        if not has_short_segments(tail_items, short_max=3.0):
-            optimized_text = f"{hook_text}{tail_text}"
-            cache_data[cache_key] = optimized_text
-            _save_voice_v0_cache(config, cache_data)
-            log_cb(f"[{voice_name}] VÒNG 0: Không có đoạn quá ngắn ở phần sau, dùng bản đã rút gọn cục bộ và lưu cache.")
-            return optimized_text
-
         raw_voice_text = tail_text
     else:
         cache_data = {}
@@ -605,25 +900,12 @@ NỘI DUNG CẦN XỬ LÝ:
 
     log_cb(f"[{voice_name}] VÒNG 0: Đang làm mượt phần sau hook đầu, chỉ ưu tiên đoạn ngắn 2-3s...")
     
-    prompt_0 = build_tail_prompt(raw_voice_text)
-
-    payload_0 = {
-        "model": "gemini-3-flash", 
-        "messages": [{"role": "user", "content": prompt_0}], 
-        "temperature": 0.2,
-        "response_format": { "type": "json_object" }  # <-- [ÉP CẤP 2] Bắt buộc nhả JSON
-    }
-    url_kie = "https://api.kie.ai/gemini-3-flash/v1/chat/completions"
-    headers = {"Authorization": f"Bearer {config.get('kie_key')}", "Content-Type": "application/json"}
+    prompt_0 = build_tail_prompt(raw_voice_text, hook_text)
 
     optimized_text = ""
     for attempt in range(3):
         try:
-            time.sleep(1)
-            res = requests.post(url_kie, headers=headers, json=payload_0, timeout=180)
-            if res.status_code != 200: raise Exception(f"Lỗi API Vòng 0: {res.text}")
-            
-            raw_out = res.json()["choices"][0]["message"]["content"]
+            raw_out = _call_ai_director(prompt_0, config, provider, model, temperature=0.2, log_cb=log_cb)
             final_json = extract_json_array(raw_out)
             final_json = merge_micro_segments_only(final_json, short_max=3.0)
             optimized_text = _format_timeline_text(final_json)

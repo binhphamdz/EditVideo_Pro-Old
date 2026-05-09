@@ -17,6 +17,10 @@ class FacelessTab:
         self.parent = parent
         self.main_app = main_app
         self.completed_count = 0
+        self.opening_lock = threading.Lock()
+        self.used_opening_videos = set()
+        self.broll_lock = threading.Lock()
+        self.used_broll_videos = set()
         self.setup_ui()
 
     def setup_ui(self):
@@ -110,14 +114,11 @@ class FacelessTab:
 
         fr_row2 = tk.Frame(top_frame, bg="#ffffff")
         fr_row2.pack(fill="x", pady=5)
-        tk.Label(fr_row2, text="Groq Key:", bg="#ffffff", font=("Arial", 9)).pack(side="left")
-        self.ent_groq = tk.Entry(fr_row2, width=25)
+        tk.Label(fr_row2, text="Groq Key (Bóc băng):", bg="#ffffff", font=("Arial", 9, "bold")).pack(side="left")
+        self.ent_groq = tk.Entry(fr_row2, width=35, show="*")
         self.ent_groq.insert(0, self.main_app.config.get("groq_key", ""))
         self.ent_groq.pack(side="left", padx=5)
-        tk.Label(fr_row2, text="Kie Key:", bg="#ffffff", font=("Arial", 9)).pack(side="left", padx=(10, 5))
-        self.ent_kie = tk.Entry(fr_row2, width=25)
-        self.ent_kie.insert(0, self.main_app.config.get("kie_key", ""))
-        self.ent_kie.pack(side="left", padx=5)
+        tk.Label(fr_row2, text="⚙️ Cấu hình AI tại Tab 10", bg="#ffffff", font=("Arial", 9, "italic"), fg="#7f8c8d").pack(side="left", padx=10)
 
         fr_row3 = tk.Frame(top_frame, bg="#ffffff")
         fr_row3.pack(fill="x", pady=5)
@@ -140,6 +141,12 @@ class FacelessTab:
         self.spin_threads = ttk.Spinbox(fr_row_thread, from_=1, to=5, width=5, font=("Arial", 10, "bold"), command=self._save_config_auto)
         self.spin_threads.set(self.main_app.config.get("threads", 2))
         self.spin_threads.pack(side="left", padx=5)
+
+        fr_row_v0 = tk.Frame(top_frame, bg="#ffffff")
+        fr_row_v0.pack(fill="x", pady=5)
+        self.use_v0 = tk.BooleanVar(value=self.main_app.config.get("enable_v0", True))
+        self.chk_use_v0 = tk.Checkbutton(fr_row_v0, text="Bật Vòng 0 (gom SRT)", variable=self.use_v0, bg="#ffffff")
+        self.chk_use_v0.pack(side="left")
 
         # CỘT PHẢI
         adj_frame = tk.LabelFrame(top_container, text=" ⚙️ Tùy Chỉnh ", font=("Arial", 11, "bold"), bg="#ffffff", padx=15, pady=10)
@@ -180,11 +187,11 @@ class FacelessTab:
         self.use_trans.trace_add("write", self._on_transition_toggle)
         self.use_sfx.trace_add("write", self._save_config_auto)
         self.ent_groq.bind("<KeyRelease>", self._save_config_auto)
-        self.ent_kie.bind("<KeyRelease>", self._save_config_auto)
         self.ent_font.bind("<KeyRelease>", self._save_config_auto)
         self.spin_threads.bind("<KeyRelease>", self._save_config_auto)
         self.spin_threads.bind("<FocusOut>", self._save_config_auto)
         self.boc_bang_mode.trace_add("write", self._save_config_auto)
+        self.use_v0.trace_add("write", self._save_config_auto)
         self._sync_transition_controls()
 
         # LOG VÀ NÚT RENDER
@@ -208,9 +215,9 @@ class FacelessTab:
             self.main_app.config["use_trans"] = self.use_trans.get()
             self.main_app.config["use_sfx"] = self.use_sfx.get()
             self.main_app.config["groq_key"] = self.ent_groq.get().strip()
-            self.main_app.config["kie_key"] = self.ent_kie.get().strip()
             self.main_app.config["font_path"] = self.ent_font.get().strip()
             self.main_app.config["boc_bang_mode"] = self.boc_bang_mode.get()
+            self.main_app.config["enable_v0"] = self.use_v0.get()
             self.main_app.config["trans_duration"] = self.scale_trans_dur.get()  # [MỚI] Lưu tốc độ chuyển cảnh
             try:
                 self.main_app.config["threads"] = int(self.spin_threads.get())
@@ -272,7 +279,8 @@ class FacelessTab:
         voice_dir = os.path.join(self.main_app.get_proj_dir(self.pid_map[proj_name]), "Voices")
         if os.path.exists(voice_dir):
             for f in os.listdir(voice_dir):
-                if f.lower().endswith(('.mp3', '.wav', '.m4a')): self.lst_voices.insert(tk.END, f)
+                if f.lower().endswith(('.mp3', '.wav', '.m4a', '.mp4', '.mov', '.mkv', '.avi', '.webm', '.m4v')):
+                    self.lst_voices.insert(tk.END, f)
 
     def _save_selected_transitions(self, event=None):
         """[MỚI] Lưu transitions đã chọn vào config"""
@@ -294,8 +302,9 @@ class FacelessTab:
             self.main_app.config["font_path"] = f_path
             self.main_app.save_config()
 
-    def add_log(self, msg):
+    def add_log(self, msg, provider=None):
         self.main_app.root.after(0, self._insert_log, msg)
+        self.main_app.log_event("tab2", msg, provider or "system")
 
     def _insert_log(self, msg):
         self.txt_log.config(state="normal")
@@ -380,6 +389,10 @@ class FacelessTab:
 
         self.main_app.config["app_base_path"] = BASE_PATH 
         bot.send_message(chat_id, f"🎬 ĐẠO DIỄN AI NHẬN LỆNH!\n📁 Project: {proj_name}\n🎙️ Đã chốt {len(final_voices)} voice sạch (Né hoàn toàn hôm nay). Đang đưa vào lò...")
+        with self.opening_lock:
+            self.used_opening_videos.clear()
+        with self.broll_lock:
+            self.used_broll_videos.clear()
         
         threading.Thread(
             target=self._run_multithread_batch, 
@@ -434,6 +447,11 @@ class FacelessTab:
         
         pid = self.pid_map[proj_name]
         proj_dir = self.main_app.get_proj_dir(pid)
+
+        with self.opening_lock:
+            self.used_opening_videos.clear()
+        with self.broll_lock:
+            self.used_broll_videos.clear()
         
         self.btn_run_batch.config(state="disabled", text="⏳ ĐANG RENDER...")
         threading.Thread(target=self._run_multithread_batch, args=(voices, proj_dir, proj_name, None, None), daemon=True).start()
@@ -465,13 +483,15 @@ class FacelessTab:
     def _process_single(self, voice_name, proj_dir, proj_name):
         from main import GLOBAL_OUT_DIR
         import database
-        from .video_engine import render_faceless_video
+        from .video_engine import render_faceless_video, render_faceless_video_with_base, apply_video_speed_after_render
         from .ai_services import get_transcription, get_director_timeline
         from datetime import datetime
         import os
         
         try:
             voice_path = os.path.join(proj_dir, "Voices", voice_name)
+            voice_ext = os.path.splitext(voice_path)[1].lower()
+            is_video_voice = voice_ext in (".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v")
             # Tạo tên file đầu ra: [Tên Project] Tên Voice_GiờPhútGiây.mp4
             out_file = os.path.join(GLOBAL_OUT_DIR, f"[{proj_name}] {os.path.splitext(voice_name)[0]}_{datetime.now().strftime('%H%M%S')}.mp4")
             pid = self.pid_map.get(proj_name)
@@ -513,6 +533,7 @@ class FacelessTab:
             
             broll_data = {}
             broll_text = ""
+            broll_usage = {}
             for r in broll_rows:
                 v = r['file_name']
                 # Tính độ dài thực tế sau khi áp dụng tốc độ video (config)
@@ -526,12 +547,25 @@ class FacelessTab:
                     'duration': r['duration'], 
                     'description': desc
                 }
+                broll_usage[v] = usage
                 broll_text += f"- File: '{v}' (Dài {dur}s) | Đã dùng: {usage} lần | Mô tả: {desc}\n"
 
             # =======================================================
             # 4. GỌI AI ĐẠO DIỄN (Lên kịch bản cắt ghép)
             # =======================================================
-            timeline = get_director_timeline(voice_text, broll_text, self.main_app.config, self.add_log, voice_name, proj_context)
+            opening_state = {"lock": self.opening_lock, "used": self.used_opening_videos}
+            broll_state = {"lock": self.broll_lock, "used": self.used_broll_videos}
+            timeline = get_director_timeline(
+                voice_text,
+                broll_text,
+                self.main_app.config,
+                self.add_log,
+                voice_name,
+                proj_context,
+                opening_state=opening_state,
+                global_broll_state=broll_state,
+                broll_usage=broll_usage,
+            )
             
             # =======================================================
             # 5. RENDER VIDEO & GHI JOB SHOPEE (DATABASE)
@@ -539,10 +573,19 @@ class FacelessTab:
             from shopee_export import export_rendered_video_to_shopee_files, is_shopee_out_of_stock_project
             
             # Hàm render giờ đây sẽ trả về danh sách chính xác các file Broll nó đã dùng
-            actual_used_brolls = render_faceless_video(
-                voice_name, voice_path, timeline, proj_dir, proj_name, 
-                self.main_app.config, out_file, GLOBAL_OUT_DIR, self.add_log, broll_data
-            )
+            if is_video_voice:
+                actual_used_brolls = render_faceless_video_with_base(
+                    voice_name, voice_path, timeline, proj_dir, proj_name,
+                    self.main_app.config, out_file, GLOBAL_OUT_DIR, self.add_log, broll_data
+                )
+            else:
+                actual_used_brolls = render_faceless_video(
+                    voice_name, voice_path, timeline, proj_dir, proj_name,
+                    self.main_app.config, out_file, GLOBAL_OUT_DIR, self.add_log, broll_data
+                )
+
+            speed_val = self.main_app.config.get("video_speed", 1.0)
+            out_file = apply_video_speed_after_render(out_file, speed_val, self.add_log)
             
             # Kiểm tra xem project có đang bật "Hết hàng" không để quyết định ghi job Shopee
             shopee_out_of_stock = is_shopee_out_of_stock_project(proj_dir)
@@ -599,5 +642,8 @@ class FacelessTab:
                 except:
                     pass
 
+            return True
+
         except Exception as e:
             self.add_log(f"❌ LỖI NGHIÊM TRỌNG {voice_name}: {e}")
+            return False

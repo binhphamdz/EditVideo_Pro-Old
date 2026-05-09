@@ -3,7 +3,7 @@ import re
 import json
 import unicodedata
 from urllib.parse import urlsplit, urlunsplit
-from paths import get_export_dir, get_posted_video_dir
+from paths import get_active_profile, get_export_dir, get_posted_video_dir
 import database
 
 VIDEO_OUTPUT_DIR = ""
@@ -19,6 +19,11 @@ def _sync_profile_paths():
 def get_video_output_dir():
     _sync_profile_paths()
     return VIDEO_OUTPUT_DIR
+
+
+def _get_profile_project_ids(profile_name=None):
+    profile_name = profile_name or get_active_profile()
+    return database.get_project_ids_for_profile(profile_name)
 
 def normalize_shopee_product_link(value):
     text = str(value or "").strip().strip('"\'')
@@ -115,10 +120,20 @@ def is_shopee_out_of_stock_project(proj_dir):
 
 def resolve_shopee_video_path(video_name):
     _sync_profile_paths()
-    for folder in (VIDEO_OUTPUT_DIR, POSTED_VIDEO_DIR):
-        candidate = os.path.join(folder, video_name)
-        if os.path.exists(candidate): return candidate
-    return os.path.join(VIDEO_OUTPUT_DIR, video_name)
+    video_name = str(video_name or "").strip()
+    candidates = [video_name]
+
+    # Cho job lưu dạng projectId_fileName -> thử cắt prefix để tìm file thật.
+    if video_name and video_name[0].isdigit() and "_" in video_name:
+        candidates.append(video_name.split("_", 1)[1])
+
+    for name in candidates:
+        for folder in (VIDEO_OUTPUT_DIR, POSTED_VIDEO_DIR):
+            candidate = os.path.join(folder, name)
+            if os.path.exists(candidate):
+                return candidate
+
+    return os.path.join(VIDEO_OUTPUT_DIR, candidates[0] if candidates else "")
 
 # ==============================================================
 # [BẢN ĐỘ MỚI] GIAO TIẾP 100% VỚI DATABASE (BỎ CSV)
@@ -160,11 +175,19 @@ def export_rendered_video_to_shopee_files(proj_dir, out_file, config=None, defau
     
     return True, "database"
 
-def load_shopee_jobs(csv_path=None, config=None):
+def load_shopee_jobs(csv_path=None, config=None, profile_name=None):
+    project_ids = _get_profile_project_ids(profile_name)
+    if not project_ids:
+        return []
+
     with database.db_lock:
         conn = database.get_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM shopee_jobs ORDER BY id ASC")
+        placeholders = ",".join(["?"] * len(project_ids))
+        cursor.execute(
+            f"SELECT * FROM shopee_jobs WHERE project_id IN ({placeholders}) ORDER BY id ASC",
+            project_ids,
+        )
         rows = cursor.fetchall()
         conn.close()
     
@@ -180,14 +203,19 @@ def load_shopee_jobs(csv_path=None, config=None):
         })
     return jobs
 
-def claim_next_shopee_job(worker_label, csv_path=None, config=None):
+def claim_next_shopee_job(worker_label, csv_path=None, config=None, profile_name=None):
+    project_ids = _get_profile_project_ids(profile_name)
+    if not project_ids:
+        return None
+
     with database.db_lock:
         conn = database.get_connection()
         cursor = conn.cursor()
         
         placeholders = ','.join(['?'] * len(PENDING_SHOPEE_STATUSES))
-        query = f"SELECT * FROM shopee_jobs WHERE status IN ({placeholders}) ORDER BY id ASC LIMIT 1"
-        cursor.execute(query, PENDING_SHOPEE_STATUSES)
+        proj_placeholders = ",".join(["?"] * len(project_ids))
+        query = f"SELECT * FROM shopee_jobs WHERE project_id IN ({proj_placeholders}) AND status IN ({placeholders}) ORDER BY id ASC LIMIT 1"
+        cursor.execute(query, project_ids + list(PENDING_SHOPEE_STATUSES))
         job = cursor.fetchone()
         
         if job:
@@ -207,27 +235,42 @@ def claim_next_shopee_job(worker_label, csv_path=None, config=None):
         conn.close()
     return None
 
-def update_shopee_status(video_name, new_status, csv_path=None, config=None):
+def update_shopee_status(video_name, new_status, csv_path=None, config=None, profile_name=None):
+    project_ids = _get_profile_project_ids(profile_name)
+    if not project_ids:
+        return False
+
     with database.db_lock:
         conn = database.get_connection()
         cursor = conn.cursor()
+        proj_placeholders = ",".join(["?"] * len(project_ids))
         # Nếu video_name có prefix project_id_ (từ tab11_auto_post), dùng exact match
         # Nếu không (từ tab4), tìm pattern %_video_name
         if "_" in video_name and video_name[0].isdigit():
             # Có prefix, dùng exact match
-            cursor.execute("UPDATE shopee_jobs SET status = ? WHERE video_name = ?", (new_status, video_name))
+            cursor.execute(
+                f"UPDATE shopee_jobs SET status = ? WHERE video_name = ? AND project_id IN ({proj_placeholders})",
+                [new_status, video_name] + project_ids,
+            )
         else:
             # Không có prefix, tìm pattern
-            cursor.execute("UPDATE shopee_jobs SET status = ? WHERE video_name LIKE ?", (new_status, f"%_{video_name}"))
+            cursor.execute(
+                f"UPDATE shopee_jobs SET status = ? WHERE video_name LIKE ? AND project_id IN ({proj_placeholders})",
+                [new_status, f"%_{video_name}"] + project_ids,
+            )
         
         updated = cursor.rowcount > 0
         conn.commit()
         conn.close()
     return updated
 
-def delete_shopee_jobs(video_names, csv_path=None, config=None):
+def delete_shopee_jobs(video_names, csv_path=None, config=None, profile_name=None):
     if isinstance(video_names, str): video_names = [video_names]
     if not video_names: return 0
+
+    project_names = set(database.get_project_names_for_profile(profile_name or get_active_profile()))
+    if not project_names:
+        return 0
     
     with database.db_lock:
         conn = database.get_connection()
@@ -245,6 +288,8 @@ def delete_shopee_jobs(video_names, csv_path=None, config=None):
             row = cursor.fetchone()
             if row:
                 project_name = row['project_name']
+                if project_name not in project_names:
+                    continue
                 # Query project_id
                 cursor.execute("SELECT id FROM projects WHERE name = ?", (project_name,))
                 proj_row = cursor.fetchone()
@@ -259,4 +304,35 @@ def delete_shopee_jobs(video_names, csv_path=None, config=None):
         
         conn.commit()
         conn.close()
+    return deleted_count
+
+def delete_shopee_jobs_by_names(video_names, profile_name=None):
+    if isinstance(video_names, str):
+        video_names = [video_names]
+    if not video_names:
+        return 0
+
+    project_ids = _get_profile_project_ids(profile_name)
+    if not project_ids:
+        return 0
+
+    with database.db_lock:
+        conn = database.get_connection()
+        cursor = conn.cursor()
+        deleted_count = 0
+        proj_placeholders = ",".join(["?"] * len(project_ids))
+
+        for video_name in video_names:
+            name = str(video_name or "").strip()
+            if not name:
+                continue
+            cursor.execute(
+                f"DELETE FROM shopee_jobs WHERE video_name = ? AND project_id IN ({proj_placeholders})",
+                [name] + project_ids,
+            )
+            deleted_count += cursor.rowcount
+
+        conn.commit()
+        conn.close()
+
     return deleted_count

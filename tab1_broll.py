@@ -26,6 +26,7 @@ class BRollTab:
         self.desc_entries = {} 
         self.thumb_labels = {}  # [MỚI] Dictionary lưu thumbnail labels
         self.product_link_entries = []
+        self.ent_tiktok_link = None  # [MỚI] TikTok link entry
         self.audio_vars = {}
         self.active_page = 1
         self.trash_page = 1
@@ -63,6 +64,7 @@ class BRollTab:
         self.tree_proj.column("name", width=250, anchor="w")
         self.tree_proj.pack(fill="both", expand=True, padx=5, pady=5)
         self.tree_proj.bind("<<TreeviewSelect>>", self.on_select_project)
+        self.tree_proj.bind("<ButtonRelease-1>", self._on_project_click)
         self.tree_proj.bind("<B1-Motion>", self._drag_select_projects)
         
         tk.Button(left_frame, text="➕ TẠO PROJECT TRỐNG", bg="#27ae60", fg="white", font=("Arial", 9, "bold"), pady=8, command=self.add_project_dialog).pack(fill="x", padx=5, pady=5)
@@ -103,14 +105,16 @@ class BRollTab:
         fr_voice.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
         
         # [NÂNG CẤP] Bảng Treeview rộng rãi, có chia cột rõ ràng
-        self.tree_voices = ttk.Treeview(fr_voice, columns=("name", "usage", "status"), show="headings", height=8)
+        self.tree_voices = ttk.Treeview(fr_voice, columns=("name", "usage", "srt_origin", "status"), show="headings", height=8)
         self.tree_voices.heading("name", text="Tên Voice")
         self.tree_voices.heading("usage", text="Số Lần Dùng")
+        self.tree_voices.heading("srt_origin", text="SRT Gốc")
         self.tree_voices.heading("status", text="Trạng Thái")
         
         # Thu gọn cột để cửa sổ thường vẫn nhìn thấy cụm nút thao tác
-        self.tree_voices.column("name", width=150, minwidth=120, anchor="w", stretch=True)
-        self.tree_voices.column("usage", width=120, minwidth=70, anchor="center", stretch=False)
+        self.tree_voices.column("name", width=140, minwidth=120, anchor="w", stretch=True)
+        self.tree_voices.column("usage", width=100, minwidth=70, anchor="center", stretch=False)
+        self.tree_voices.column("srt_origin", width=80, minwidth=70, anchor="center", stretch=False)
         self.tree_voices.column("status", width=190, minwidth=150, anchor="w", stretch=True)
         
         scroll_voice_tab1 = ttk.Scrollbar(fr_voice, orient="vertical", command=self.tree_voices.yview)
@@ -154,6 +158,9 @@ class BRollTab:
         self.btn_auto_tag = tk.Button(btn_ai_fr, text="🧠 AI TỰ NHÌN & ĐIỀN", bg="#d35400", fg="white", font=("Arial", 9, "bold"), command=self.start_auto_tag, height=2)
         self.btn_auto_tag.pack(side="left", fill="x", expand=True, padx=(0, 5))
 
+        self.btn_auto_tag_page = tk.Button(btn_ai_fr, text="📄 AI SOI TRANG", bg="#e67e22", fg="white", font=("Arial", 9, "bold"), command=self.start_auto_tag_current_page, height=2)
+        self.btn_auto_tag_page.pack(side="left", fill="x", expand=True, padx=(0, 5))
+
         # [MỚI THÊM] BỘ ĐẾM SỐ LƯỢNG MÔ TẢ TRỐNG
         self.lbl_missing_desc = tk.Label(btn_ai_fr, text="Đang tính...", font=("Arial", 10, "bold"), fg="#c0392b", bg="#ffffff")
         self.lbl_missing_desc.pack(side="left", padx=10)
@@ -188,10 +195,11 @@ class BRollTab:
         # Nút xóa ảnh mẫu
         tk.Button(fr_ref, text="❌", bg="#e74c3c", fg="white", font=("Arial", 8), command=self.clear_ref_images).pack(side="right")
 
-        # [MỚI] KHUNG THÔNG TIN SẢN PHẨM / LINK SHOPEE
+
+        # [MỚI] KHUNG THÔNG TIN SẢN PHẨM / LINK SHOPEE / TIKTOK
         fr_product_info = tk.LabelFrame(
             control_panel,
-            text=" Thông tin Shopee & Quản lý Job Hàng Loạt ",
+            text=" Thông tin Shopee & TikTok & Quản lý Job Hàng Loạt ",
             font=("Arial", 10, "bold"),
             bg="#ffffff",
             padx=12,
@@ -213,6 +221,22 @@ class BRollTab:
         self.ent_product_name = tk.Entry(row_name, font=("Arial", 10))
         self.ent_product_name.pack(side="left", fill="x", expand=True)
         self.ent_product_name.bind("<KeyRelease>", self._on_product_info_change)
+
+        # [MỚI] Link sản phẩm TikTok
+        row_tiktok = tk.Frame(fr_product_info, bg="#ffffff")
+        row_tiktok.pack(fill="x", pady=(0, 6))
+        tk.Label(
+            row_tiktok,
+            text="Link TikTok:",
+            bg="#ffffff",
+            fg="#1f4e79",
+            font=("Arial", 10, "bold"),
+            width=14,
+            anchor="w",
+        ).pack(side="left")
+        self.ent_tiktok_link = tk.Entry(row_tiktok, font=("Arial", 10))
+        self.ent_tiktok_link.pack(side="left", fill="x", expand=True)
+        self.ent_tiktok_link.bind("<KeyRelease>", self._on_product_info_change)
 
         row_stock = tk.Frame(fr_product_info, bg="#ffffff")
         row_stock.pack(fill="x", pady=(0, 6))
@@ -552,6 +576,9 @@ class BRollTab:
         clean_text = (text or "").strip()
         return clean_text.startswith("⏳ AI ") or clean_text.startswith("❌ ")
 
+    def add_log(self, msg, provider=None):
+        self.main_app.log_event("tab1", msg, provider or "system")
+
     def _start_ai_task(self, project_id, vid_name, message):
         self.ai_task_counter += 1
         task_token = self.ai_task_counter
@@ -606,7 +633,10 @@ class BRollTab:
     def _drag_select_projects(self, event):
         item = self.tree_proj.identify_row(event.y)
         if item:
-            self.tree_proj.selection_add(item)
+            if event.state & 0x0005:
+                self.tree_proj.selection_add(item)
+            else:
+                self.tree_proj.selection_set(item)
 
     def _get_selected_project_ids(self):
         selected_ids = list(self.tree_proj.selection())
@@ -647,6 +677,16 @@ class BRollTab:
 
         return "⏳ Chờ bóc SRT"
 
+    def _get_voice_origin_display(self, project_id, voice_name, p_data=None):
+        if not project_id:
+            return "Chưa"
+
+        if p_data is None:
+            p_data = self.main_app.get_project_data(project_id)
+
+        origin_map = p_data.get("voice_srt_origin", {}) or {}
+        return "Có" if origin_map.get(voice_name) else "Chưa"
+
     def _refresh_voice_row(self, voice_name, project_id=None):
         project_id = project_id or self.current_project_id
         if not project_id or project_id != self.current_project_id:
@@ -655,6 +695,7 @@ class BRollTab:
         p_data = self.main_app.get_project_data(project_id)
         usage = p_data.get("voice_usage", {}).get(voice_name, 0)
         status_text = self._get_voice_display_status(project_id, voice_name, p_data)
+        origin_text = self._get_voice_origin_display(project_id, voice_name, p_data)
         voice_path = os.path.join(self.main_app.get_proj_dir(project_id), "Voices", voice_name)
 
         if not os.path.exists(voice_path):
@@ -662,7 +703,7 @@ class BRollTab:
                 self.tree_voices.delete(voice_name)
             return
 
-        values = (voice_name, f"{usage} lần", status_text)
+        values = (voice_name, f"{usage} lần", origin_text, status_text)
         if self.tree_voices.exists(voice_name):
             self.tree_voices.item(voice_name, values=values)
         else:
@@ -749,6 +790,7 @@ class BRollTab:
         if self.current_project_id in self.main_app.projects:
             self.tree_proj.selection_set(selected_ids)
             self.tree_proj.focus(self.current_project_id)
+            self.tree_proj.see(self.current_project_id)
         self.main_app.tab2.update_combo_projects()
 
     def import_broll(self):
@@ -759,7 +801,7 @@ class BRollTab:
             # Lấy tên Project và gọt sạch sẽ
             proj_name = self.main_app.projects[project_id]['name']
             clean_proj = self._clean_project_name(proj_name)
-            
+
             broll_dir = os.path.join(self.main_app.get_proj_dir(project_id), "Broll")
             os.makedirs(broll_dir, exist_ok=True)
             
@@ -790,7 +832,12 @@ class BRollTab:
         
         # 1. Quét file vật lý trước để tìm các file mp3 sếp mới copy tay vào
         voice_dir = os.path.join(self.main_app.get_proj_dir(self.current_project_id), "Voices")
-        physical_files = [f for f in os.listdir(voice_dir) if f.lower().endswith(('.mp3', '.wav', '.m4a'))] if os.path.exists(voice_dir) else []
+        physical_files = [
+            f for f in os.listdir(voice_dir)
+            if f.lower().endswith((
+                '.mp3', '.wav', '.m4a', '.mp4', '.mov', '.mkv', '.avi', '.webm', '.m4v'
+            ))
+        ] if os.path.exists(voice_dir) else []
         
         import database
         with database.db_lock:
@@ -808,13 +855,24 @@ class BRollTab:
             conn.close()
         
         # Trong vòng lặp load_voices...
+        p_data = self.main_app.get_project_data(self.current_project_id)
+        origin_map = p_data.get("voice_srt_origin", {}) or {}
         for v in voices:
             f_name = v['file_name']
-            if f_name in physical_files:
-                count = v['usage_count']
-                # Nếu srt_cache có dữ liệu (không phải None hoặc rỗng) thì báo Xong
-                status_text = "✅ Đã xong" if (v['srt_cache'] and v['srt_cache'].strip()) else "⏳ Chờ bóc SRT"
-                self.tree_voices.insert("", "end", iid=f_name, values=(f_name, f"{count} lần", status_text))
+            count = int(v['usage_count'] or 0)
+            status_text = "✅ Đã xong" if (v['srt_cache'] and v['srt_cache'].strip()) else "⏳ Chờ bóc SRT"
+            if f_name not in physical_files:
+                # File đã bị xóa thủ công hoặc lỗi lưu trước đó -> dọn DB
+                import database
+                with database.db_lock:
+                    conn = database.get_connection()
+                    cursor = conn.cursor()
+                    cursor.execute("DELETE FROM voices WHERE project_id = ? AND file_name = ?", (db_proj_id, f_name))
+                    conn.commit()
+                    conn.close()
+                continue
+            origin_text = "Có" if origin_map.get(f_name) else "Chưa"
+            self.tree_voices.insert("", "end", iid=f_name, values=(f_name, f"{count} lần", origin_text, status_text))
 
     def play_voice(self):
         selected = self.tree_voices.selection()
@@ -822,35 +880,36 @@ class BRollTab:
             # Lấy tên file ở Cột số 0
             file_name = self.tree_voices.item(selected[0])['values'][0]
             file_path = os.path.join(self.main_app.get_proj_dir(self.current_project_id), "Voices", file_name)
-            if os.path.exists(file_path):
-                os.startfile(file_path)
+            if not os.path.exists(file_path):
+                return messagebox.showwarning("Không thấy file", "Voice này không còn file trên ổ cứng.")
+            os.startfile(file_path)
 
     def delete_voice(self):
         selected = self.tree_voices.selection()
         if selected and messagebox.askyesno("Xóa", "Xóa Voice này?"):
             file_name = self.tree_voices.item(selected[0])['values'][0]
             file_path = os.path.join(self.main_app.get_proj_dir(self.current_project_id), "Voices", file_name)
-            
-            if os.path.exists(file_path):
-                try:
+            try:
+                if os.path.exists(file_path):
                     os.remove(file_path)
-                    
-                    # Bắn lệnh SQL xóa vĩnh viễn khỏi Database
-                    import database
-                    with database.db_lock:
-                        conn = database.get_connection()
-                        cursor = conn.cursor()
-                        proj_name = self.main_app.projects[self.current_project_id]['name']
-                        cursor.execute("SELECT id FROM projects WHERE name = ?", (proj_name,))
-                        db_proj_id = cursor.fetchone()['id']
-                        
+
+                # Bắn lệnh SQL xóa vĩnh viễn khỏi Database
+                import database
+                with database.db_lock:
+                    conn = database.get_connection()
+                    cursor = conn.cursor()
+                    proj_name = self.main_app.projects[self.current_project_id]['name']
+                    cursor.execute("SELECT id FROM projects WHERE name = ?", (proj_name,))
+                    row = cursor.fetchone()
+                    if row:
+                        db_proj_id = row['id']
                         cursor.execute("DELETE FROM voices WHERE project_id = ? AND file_name = ?", (db_proj_id, file_name))
-                        conn.commit()
-                        conn.close()
-                    
-                    self._clear_voice_status(self.current_project_id, file_name)
-                except Exception as e:
-                    messagebox.showerror("Lỗi", f"Không thể xóa file: {e}")
+                    conn.commit()
+                    conn.close()
+
+                self._clear_voice_status(self.current_project_id, file_name)
+            except Exception as e:
+                messagebox.showerror("Lỗi", f"Không thể xóa voice: {e}")
             self.load_voices()
 
     def _normalize_voice_marker_text(self, text):
@@ -1170,19 +1229,45 @@ class BRollTab:
             p_data = self.main_app.get_project_data(project_id)
             if "voice_usage" not in p_data: p_data["voice_usage"] = {}
             if "voice_srt_cache" not in p_data: p_data["voice_srt_cache"] = {}
+            if "voice_srt_origin" not in p_data: p_data["voice_srt_origin"] = {}
             
             # Lấy con số tiếp theo
             current_idx = self._get_next_index(voice_dir, clean_proj)
+
+            import database
+            db_proj_id = database.get_or_create_project(proj_name)
             
             for f in media_files:
-                # Đặt tên mới: vd tuixachda_1.mp3
-                target_name = f"{clean_proj}_{current_idx}.mp3"
+                ext = os.path.splitext(f)[1].lower()
+                is_video = ext in (".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v")
+
+                # Đặt tên mới: vd tuixachda_1.mp3 hoặc tuixachda_1.mp4
+                target_name = f"{clean_proj}_{current_idx}{ext if is_video else '.mp3'}"
                 current_idx += 1 # Đếm lên
-                
-                file_name, file_path = self._save_media_as_mp3(f, voice_dir, target_name)
+
+                if is_video:
+                    file_name = target_name
+                    file_path = os.path.join(voice_dir, file_name)
+                    shutil.copy2(f, file_path)
+                    self._log_extract(f"✅ Đã lưu video voice: {file_name}", project_id=project_id)
+                else:
+                    file_name, file_path = self._save_media_as_mp3(f, voice_dir, target_name)
                 
                 if file_name not in p_data["voice_usage"]:
                     p_data["voice_usage"][file_name] = 0
+
+                try:
+                    with database.db_lock:
+                        conn = database.get_connection()
+                        cursor = conn.cursor()
+                        cursor.execute(
+                            "INSERT OR IGNORE INTO voices (project_id, file_name) VALUES (?, ?)",
+                            (db_proj_id, file_name)
+                        )
+                        conn.commit()
+                        conn.close()
+                except Exception as e:
+                    self._log_extract(f"⚠️ Lỗi ghi voice vào DB {file_name}: {str(e)[:120]}", project_id=project_id)
 
                 src_base = os.path.splitext(os.path.basename(f))[0].strip().lower()
                 matched_srt = srt_map.get(src_base)
@@ -1192,6 +1277,19 @@ class BRollTab:
                         srt_text = self._load_srt_as_timeline_text(matched_srt)
                         if srt_text.strip():
                             p_data["voice_srt_cache"][file_name] = srt_text
+                            p_data["voice_srt_origin"][file_name] = True
+                            try:
+                                with database.db_lock:
+                                    conn = database.get_connection()
+                                    cursor = conn.cursor()
+                                    cursor.execute(
+                                        "UPDATE voices SET srt_cache = ?, srt_origin = 1 WHERE project_id = ? AND file_name = ?",
+                                        (srt_text, db_proj_id, file_name)
+                                    )
+                                    conn.commit()
+                                    conn.close()
+                            except Exception as e:
+                                self._log_extract(f"⚠️ Lỗi lưu SRT tay vào DB {file_name}: {str(e)[:120]}", project_id=project_id)
                             self._set_voice_status(project_id, file_name, "✅ Đã nạp SRT tay")
                             self._log_extract(f"✅ Đã nhận diện SRT đi kèm cho {file_name}", project_id=project_id)
                             continue
@@ -1270,17 +1368,51 @@ class BRollTab:
         except Exception as e:
             self._log_extract(f"⚠️ Lỗi đọc DB: {str(e)}", project_id=project_id)
 
+        # 1b. Fallback: dùng cache trong project data (nếu có) và đồng bộ lại DB
+        try:
+            p_data = self.main_app.get_project_data(project_id)
+            cached_srt = (p_data.get("voice_srt_cache", {}) or {}).get(voice_name, "")
+            if cached_srt and cached_srt.strip():
+                with database.db_lock:
+                    conn = database.get_connection()
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        "INSERT OR IGNORE INTO voices (project_id, file_name) VALUES (?, ?)",
+                        (db_proj_id, voice_name)
+                    )
+                    cursor.execute(
+                        "UPDATE voices SET srt_cache = ? WHERE project_id = ? AND file_name = ?",
+                        (cached_srt, db_proj_id, voice_name)
+                    )
+                    conn.commit()
+                    conn.close()
+                return cached_srt
+        except Exception as e:
+            self._log_extract(f"⚠️ Lỗi đọc cache SRT project: {str(e)}", project_id=project_id)
+
         # 2. Nếu chưa có, tiến hành bóc băng mới
         try:
             self._log_extract(f"🎙️ Đang bóc băng mới: {voice_name}...", project_id=project_id)
-            
+            transcribe_path = voice_path
+            temp_audio_path = None
+            try:
+                transcribe_path, temp_audio_path = self._prepare_voice_source_for_transcription(voice_path)
+            except Exception as exc:
+                self._log_extract(f"❌ Không tách được audio từ {voice_name}: {str(exc)[:120]}", project_id=project_id)
+                raise
+
             srt_text = get_transcription(
-                voice_path, 
-                voice_name, 
-                self._get_transcription_mode(), 
-                self.main_app.config, 
+                transcribe_path,
+                voice_name,
+                self._get_transcription_mode(),
+                self.main_app.config,
                 lambda msg: self._log_extract(msg, project_id=project_id)
             )
+            if temp_audio_path and os.path.exists(temp_audio_path):
+                try:
+                    os.remove(temp_audio_path)
+                except OSError:
+                    pass
             
             if srt_text and srt_text.strip():
                 # [QUAN TRỌNG] Ghi ngay vào Database để lần sau không tốn tiền API
@@ -1328,8 +1460,14 @@ class BRollTab:
 
     def on_select_project(self, event):
         selected = self.tree_proj.selection()
-        if not selected: return
-        next_project_id = selected[0]
+        if not selected:
+            return
+
+        # Luôn ưu tiên item vừa click (focus) để tránh bị kẹt khi chọn nhiều.
+        focused = self.tree_proj.focus()
+        next_project_id = focused if focused in self.main_app.projects else selected[-1]
+        if next_project_id not in self.main_app.projects:
+            return
 
         if self.current_project_id and self.current_project_id != next_project_id:
             self.save_all_descriptions()
@@ -1338,6 +1476,8 @@ class BRollTab:
 
         self.current_project_id = next_project_id
         self.lbl_proj_name.config(text=self.main_app.projects[self.current_project_id]['name'])
+        if hasattr(self, "ent_search") and self.ent_search.winfo_exists():
+            self.ent_search.delete(0, tk.END)
         self.load_voices()
         self.render_video_list(reset_pages=True)
         # Đổi trạng thái nút bấm
@@ -1356,6 +1496,20 @@ class BRollTab:
         ref2 = p_data.get("ref_img_2", "")
         self.lbl_ref1.config(text=self._format_ref_image_name(ref1), fg="#27ae60" if ref1 else "gray")
         self.lbl_ref2.config(text=self._format_ref_image_name(ref2), fg="#27ae60" if ref2 else "gray")
+
+        if hasattr(self.main_app, "tab12"):
+            self.main_app.tab12.set_project(self.current_project_id)
+
+    def _on_project_click(self, event):
+        item = self.tree_proj.identify_row(event.y)
+        if not item:
+            return
+
+        self.tree_proj.focus(item)
+        # Nếu không giữ Ctrl/Shift thì chọn đơn để chắc chắn reload đúng project.
+        if not (event.state & 0x0004 or event.state & 0x0001 or event.state & 0x0002):
+            self.tree_proj.selection_set(item)
+        self.on_select_project(event)
 
     def _reset_project_view(self, project_id=None):
         if project_id:
@@ -1556,6 +1710,12 @@ class BRollTab:
         self.render_video_list()
 
     def render_video_list(self, reset_pages=False):
+        # [MỚI] Khi render xong, caption TikTok = tên project, link TikTok lấy từ project data
+        if self.current_project_id:
+            p_data = self.main_app.get_project_data(self.current_project_id)
+            tiktok_link = p_data.get("tiktok_link", "")
+            proj_name = self.main_app.projects[self.current_project_id]["name"]
+            # Khi xuất ra video, nếu có logic lưu metadata, hãy lưu tiktok_link và caption = proj_name
         if reset_pages:
             self.active_page = 1
             self.trash_page = 1
@@ -1643,11 +1803,48 @@ class BRollTab:
         remaining_act_files = [f for f in all_act_files if f not in act_files]
         remaining_tr_files = [f for f in all_tr_files if f not in tr_files]
         if remaining_act_files or remaining_tr_files:
-            threading.Thread(
-                target=self.thumb_handler.generate,
-                args=(project_id, broll_dir, trash_dir, remaining_act_files, remaining_tr_files, None, False),
-                daemon=True,
-            ).start()
+            self._schedule_thumbnail_batches(
+                project_id,
+                broll_dir,
+                trash_dir,
+                remaining_act_files,
+                remaining_tr_files,
+                current_request_id,
+            )
+
+    def _schedule_thumbnail_batches(self, project_id, broll_dir, trash_dir, act_files, tr_files, render_request_id):
+        batch_size = 20
+        delay_ms = 150
+        act_queue = list(act_files)
+        tr_queue = list(tr_files)
+
+        def run_next_batch():
+            if not self._is_render_request_current(project_id, render_request_id):
+                return
+            if not act_queue and not tr_queue:
+                return
+
+            act_batch = act_queue[:batch_size]
+            tr_batch = tr_queue[:batch_size]
+            del act_queue[:batch_size]
+            del tr_queue[:batch_size]
+
+            def worker():
+                self.thumb_handler.generate(
+                    project_id,
+                    broll_dir,
+                    trash_dir,
+                    act_batch,
+                    tr_batch,
+                    render_request_id,
+                    False,
+                )
+                if self._is_render_request_current(project_id, render_request_id):
+                    self.main_app.root.after(delay_ms, run_next_batch)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        self.main_app.root.after(delay_ms, run_next_batch)
 
     def _build_video_rows(self, project_id, broll_dir, trash_dir, act_files, tr_files, p_data, render_request_id=None):
         if not self._is_render_request_current(project_id, render_request_id):
@@ -1922,11 +2119,15 @@ class BRollTab:
     def _load_product_info(self, p_data):
         self.ent_product_name.delete(0, tk.END)
         self.ent_product_name.insert(0, p_data.get("product_name", ""))
+        # [MỚI] Load link TikTok
+        if self.ent_tiktok_link:
+            self.ent_tiktok_link.delete(0, tk.END)
+            self.ent_tiktok_link.insert(0, p_data.get("tiktok_link", ""))
         self.var_shopee_out_of_stock.set(bool(p_data.get("shopee_out_of_stock", False)))
 
         links = p_data.get("product_links", [])
         if len(links) < 6:
-            links = list(links) + [""] * (6 - len(links))
+            links = list(links) + ["" for _ in range(6 - len(links))]
 
         for idx, entry in enumerate(self.product_link_entries):
             entry.delete(0, tk.END)
@@ -1960,16 +2161,24 @@ class BRollTab:
         p_data["product_name"] = self.ent_product_name.get().strip()
         p_data["shopee_out_of_stock"] = bool(self.var_shopee_out_of_stock.get())
         p_data["product_links"] = cleaned_links
+        # [MỚI] Lưu link TikTok
+        if self.ent_tiktok_link:
+            p_data["tiktok_link"] = self.ent_tiktok_link.get().strip()
         self.main_app.save_project_data(self.current_project_id, p_data)
 
     def start_auto_tag(self):
         if not self.current_project_id: return messagebox.showwarning("Lỗi", "Phải chọn 1 Project trước!")
-        kie_key = self.main_app.config.get("kie_key", "")
-        if not kie_key:
-            kie_key = simpledialog.askstring("Nhập API Key", "Dán Kie.ai Key vào đây:")
-            if not kie_key: return
-            self.main_app.config["kie_key"] = kie_key
-            self.main_app.save_config()
+        
+        # Kiểm tra có API key theo provider
+        provider = self.main_app.config.get("ai_provider", "kie")
+        if provider == "shopaikey":
+            key_field = "shopaikey_key"
+        elif provider == "openai":
+            key_field = "openai_key"
+        else:
+            key_field = "kie_key"
+        if not self.main_app.config.get(key_field, ""):
+            return messagebox.showerror("Lỗi", f"Chưa cấu hình {key_field.replace('_', ' ').title()}! Vui lòng cài đặt trong Tab 10.")
 
         project_id = self.current_project_id
         self.save_all_descriptions()
@@ -1985,11 +2194,12 @@ class BRollTab:
             if vid_name not in saved_videos:
                 continue
 
-            if self._get_ai_task_state(project_id, vid_name):
+            state = self._get_ai_task_state(project_id, vid_name)
+            if state and state.get("state") == "running":
                 continue
 
             current_text = saved_videos.get(vid_name, {}).get("description", "").strip()
-            if current_text:
+            if current_text and not self._is_transient_ai_message(current_text):
                 continue
 
             task_token = self._start_ai_task(project_id, vid_name, "⏳ AI đang soi ảnh (kèm mẫu)...")
@@ -2001,16 +2211,68 @@ class BRollTab:
 
         ref1 = p_data.get("ref_img_1", "")
         ref2 = p_data.get("ref_img_2", "")
-        threading.Thread(target=self.ai_handler.process_auto_tag, args=(project_id, videos_to_tag, kie_key, context, ref1, ref2), daemon=True).start()
+        threading.Thread(target=self.ai_handler.process_auto_tag, args=(project_id, videos_to_tag, self.main_app.config, context, ref1, ref2), daemon=True).start()
+
+    def start_auto_tag_current_page(self):
+        if not self.current_project_id:
+            return messagebox.showwarning("Lỗi", "Phải chọn 1 Project trước!")
+
+        provider = self.main_app.config.get("ai_provider", "kie")
+        if provider == "shopaikey":
+            key_field = "shopaikey_key"
+        elif provider == "openai":
+            key_field = "openai_key"
+        else:
+            key_field = "kie_key"
+        if not self.main_app.config.get(key_field, ""):
+            return messagebox.showerror("Lỗi", f"Chưa cấu hình {key_field.replace('_', ' ').title()}! Vui lòng cài đặt trong Tab 10.")
+
+        project_id = self.current_project_id
+        self.save_all_descriptions()
+        context = self.txt_context.get("1.0", tk.END).strip()
+
+        p_data = self.main_app.get_project_data(project_id)
+        saved_videos = p_data.get("videos", {})
+        current_page_files, _, _, _ = self._get_paginated_files(self.filtered_act_files, self.active_page)
+
+        videos_to_tag = []
+        for vid_name in current_page_files:
+            if vid_name not in saved_videos:
+                continue
+
+            state = self._get_ai_task_state(project_id, vid_name)
+            if state and state.get("state") == "running":
+                continue
+
+            current_text = saved_videos.get(vid_name, {}).get("description", "").strip()
+            if current_text and not self._is_transient_ai_message(current_text):
+                continue
+
+            task_token = self._start_ai_task(project_id, vid_name, "⏳ AI đang soi ảnh (trang hiện tại)...")
+            videos_to_tag.append((vid_name, task_token))
+
+        if not videos_to_tag:
+            return messagebox.showinfo("Thông báo", "Trang hiện tại không còn cảnh trống để soi.")
+
+        self.btn_auto_tag_page.config(state="disabled", text="⏳ ĐANG SOI TRANG...", bg="#7f8c8d")
+
+        ref1 = p_data.get("ref_img_1", "")
+        ref2 = p_data.get("ref_img_2", "")
+        threading.Thread(target=self.ai_handler.process_auto_tag, args=(project_id, videos_to_tag, self.main_app.config, context, ref1, ref2), daemon=True).start()
 
     def start_single_auto_tag(self, vid_name):
         if not self.current_project_id: return
-        kie_key = self.main_app.config.get("kie_key", "")
-        if not kie_key:
-            kie_key = simpledialog.askstring("Nhập API Key", "Dán Kie.ai Key vào đây:")
-            if not kie_key: return
-            self.main_app.config["kie_key"] = kie_key
-            self.main_app.save_config()
+        
+        # Kiểm tra có API key theo provider
+        provider = self.main_app.config.get("ai_provider", "kie")
+        if provider == "shopaikey":
+            key_field = "shopaikey_key"
+        elif provider == "openai":
+            key_field = "openai_key"
+        else:
+            key_field = "kie_key"
+        if not self.main_app.config.get(key_field, ""):
+            return messagebox.showerror("Lỗi", f"Chưa cấu hình {key_field.replace('_', ' ').title()}! Vui lòng cài đặt trong Tab 10.")
 
         project_id = self.current_project_id
         context = self.txt_context.get("1.0", tk.END).strip()
@@ -2029,7 +2291,7 @@ class BRollTab:
         p_data = self.main_app.get_project_data(project_id)
         ref1 = p_data.get("ref_img_1", "")
         ref2 = p_data.get("ref_img_2", "")
-        threading.Thread(target=self.ai_handler.process_single_tag, args=(project_id, task_token, kie_key, vid_name, context, ref1, ref2, hint_text), daemon=True).start()
+        threading.Thread(target=self.ai_handler.process_single_tag, args=(project_id, task_token, self.main_app.config, vid_name, context, ref1, ref2, hint_text), daemon=True).start()
 
 
     # =======================================================

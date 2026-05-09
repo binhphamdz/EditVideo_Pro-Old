@@ -14,6 +14,9 @@ from paths import BASE_PATH, resource_path
 # [MỚI] TẠO Ổ KHÓA TOÀN CỤC BẢO VỆ FILE EXCEL (CSV)
 # =======================================================
 csv_write_lock = threading.Lock()
+ffmpeg_heavy_render_lock = threading.Lock()
+
+FFMPEG_FILTER_MEMORY_GUARD = ["-filter_threads", "1", "-filter_complex_threads", "1"]
 
 SAFE_XFADE_TRANSITIONS = {
     'fade', 'slideleft', 'slideright', 'slideup', 'slidedown',
@@ -174,6 +177,87 @@ def get_vid_info(file_path):
         return dur, has_audio
     except:
         return 5.0, False
+
+
+def _build_atempo_chain(speed):
+    if speed <= 0:
+        return "atempo=1.0"
+
+    factors = []
+    remaining = float(speed)
+
+    while remaining > 2.0:
+        factors.append(2.0)
+        remaining /= 2.0
+
+    while remaining < 0.5:
+        factors.append(0.5)
+        remaining /= 0.5
+
+    factors.append(remaining)
+    return ",".join(f"atempo={f:.3f}" for f in factors)
+
+
+def apply_video_speed_after_render(video_path, speed, log_cb):
+    try:
+        speed = float(speed)
+    except Exception:
+        speed = 1.0
+
+    if abs(speed - 1.0) < 0.001:
+        return video_path
+
+    if not os.path.exists(video_path):
+        raise Exception(f"Không tìm thấy video để tăng tốc: {video_path}")
+
+    log_cb(f"[PostRender] Tăng tốc video tổng x{speed:.2f}...")
+
+    out_dir = os.path.dirname(video_path)
+    base_name = os.path.splitext(os.path.basename(video_path))[0]
+    temp_path = os.path.join(out_dir, f"{base_name}_speed_{int(time.time() * 1000)}.mp4")
+    creation_flags = 0x08000000 if os.name == 'nt' else 0
+
+    _, has_audio = get_vid_info(video_path)
+    v_filter = f"setpts=PTS/{speed:.6f}"
+
+    if has_audio:
+        a_filter = _build_atempo_chain(speed)
+        filter_complex = f"[0:v]{v_filter}[v];[0:a]{a_filter}[a]"
+        ffmpeg_cmd = [
+            "ffmpeg", "-y", "-i", video_path,
+            "-filter_complex", filter_complex,
+            "-map", "[v]", "-map", "[a]",
+            "-c:v", "h264_nvenc", "-preset", "p1", "-b:v", "8000k",
+            "-c:a", "aac", "-b:a", "192k",
+            "-shortest", temp_path,
+        ]
+    else:
+        ffmpeg_cmd = [
+            "ffmpeg", "-y", "-i", video_path,
+            "-filter:v", v_filter,
+            "-c:v", "h264_nvenc", "-preset", "p1", "-b:v", "8000k",
+            "-an", temp_path,
+        ]
+
+    result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore", creationflags=creation_flags)
+    if result.returncode != 0:
+        fallback_cmd = [
+            "ffmpeg", "-y", "-i", video_path,
+            "-filter:v", v_filter,
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        ]
+        if has_audio:
+            fallback_cmd += ["-filter:a", _build_atempo_chain(speed), "-c:a", "aac", "-b:a", "192k", "-shortest"]
+        else:
+            fallback_cmd += ["-an"]
+        fallback_cmd.append(temp_path)
+        result = subprocess.run(fallback_cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore", creationflags=creation_flags)
+
+    if result.returncode != 0 or not os.path.exists(temp_path) or os.path.getsize(temp_path) == 0:
+        raise Exception(f"Lỗi tăng tốc video: {(result.stderr or result.stdout or '')[-1200:]}")
+
+    os.replace(temp_path, video_path)
+    return video_path
 
 # [BẢN ĐỘ MỚI - FIX LỖI HỤT VIDEO] 
 def render_faceless_video(voice_name, voice_path, timeline, proj_dir, proj_name, config, out_file, out_dir, log_cb, broll_data=None):
@@ -447,6 +531,7 @@ def render_faceless_video(voice_name, voice_path, timeline, proj_dir, proj_name,
     ffmpeg_cmd = [
         'ffmpeg', '-y'
     ] + inputs + [
+        *FFMPEG_FILTER_MEMORY_GUARD,
         '-filter_complex_script', filter_script_path,
         '-map', outv_map,
         '-map', a_mix_final_map,
@@ -456,15 +541,20 @@ def render_faceless_video(voice_name, voice_path, timeline, proj_dir, proj_name,
         temp_main_mp4
     ]
 
-    process = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore', creationflags=creation_flags)
+    with ffmpeg_heavy_render_lock:
+        process = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore', creationflags=creation_flags)
     if process.returncode != 0 and chosen_trans and ("Not yet implemented in FFmpeg" in process.stderr or "Error applying option 'transition'" in process.stderr):
         fallback_filter_complex = filter_complex.replace(f"transition={chosen_trans}", "transition=fade", 1)
         with open(filter_script_path, 'w', encoding='utf-8') as f: f.write(fallback_filter_complex)
-        process = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore', creationflags=creation_flags)
-    if process.returncode != 0 and flt_fade and xfade_fallback_flt and ("Parsed_xfade" in process.stderr or "do not match" in process.stderr or "Failed to configure output pad" in process.stderr):
+        with ffmpeg_heavy_render_lock:
+            process = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore', creationflags=creation_flags)
+    if process.returncode != 0 and flt_fade and xfade_fallback_flt and ("Parsed_xfade" in process.stderr or "do not match" in process.stderr or "Failed to configure output pad" in process.stderr or "Cannot allocate memory" in process.stderr):
+        if "Cannot allocate memory" in process.stderr:
+            log_cb(f"[{voice_name}] ⚠️ FFmpeg thiếu RAM khi chuyển cảnh, render lại không dùng xfade...")
         fallback_filter_complex = filter_complex.replace(flt_fade, xfade_fallback_flt, 1)
         with open(filter_script_path, 'w', encoding='utf-8') as f: f.write(fallback_filter_complex)
-        process = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore', creationflags=creation_flags)
+        with ffmpeg_heavy_render_lock:
+            process = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore', creationflags=creation_flags)
 
     if process.returncode != 0: raise Exception(f"Lỗi FFmpeg: {process.stderr[-1500:]}")
 
@@ -571,3 +661,315 @@ def render_faceless_video(voice_name, voice_path, timeline, proj_dir, proj_name,
     elif exported_to_shopee: log_cb(f"[{voice_name}] ✅ Đã lưu Job Shopee thành công!")
         
     return list(global_used_vids)
+
+
+def render_faceless_video_with_base(voice_name, voice_path, timeline, proj_dir, proj_name, config, out_file, out_dir, log_cb, broll_data=None):
+    used_brolls = []
+
+    bright_val = config.get("video_bright", 1.0)
+    broll_vol = config.get("broll_vol", 30) / 100.0
+    custom_font = config.get("font_path", "")
+
+    voice_dur, voice_has_audio = get_vid_info(voice_path)
+
+    all_brolls = [f for f in os.listdir(os.path.join(proj_dir, "Broll")) if f.lower().endswith((".mp4", ".mov"))]
+    if not all_brolls:
+        raise Exception("Không tìm thấy video Broll nào trong project!")
+
+    def pick_loose_broll():
+        candidates = sorted(all_brolls, key=lambda v: broll_data.get(v, {}).get("usage_count", 0))
+        top = candidates[:5] if len(candidates) > 5 else candidates
+        return random.choice(top) if top else random.choice(all_brolls)
+
+    segments = []
+    timeline = timeline or []
+    timeline_sorted = sorted(timeline, key=lambda item: float(item.get("start", 0.0) or 0.0))
+
+    first_overlay_done = False
+    for row in timeline_sorted:
+        start = float(row.get("start", 0.0) or 0.0)
+        end = float(row.get("end", 0.0) or 0.0)
+        if end <= start:
+            continue
+
+        candidates = row.get("video_files", []) or row.get("video_file", []) or []
+        if isinstance(candidates, str):
+            candidates = [candidates]
+        candidates = [c for c in candidates if os.path.exists(os.path.join(proj_dir, "Broll", c))]
+
+        if not candidates and first_overlay_done:
+            continue
+
+        broll_name = candidates[0] if candidates else pick_loose_broll()
+        broll_path = os.path.join(proj_dir, "Broll", broll_name)
+        clip_dur, clip_has_audio = get_vid_info(broll_path)
+        if clip_dur <= 0:
+            continue
+
+        if not first_overlay_done:
+            start = 0.0
+
+        seg_dur = max(0.0, end - start)
+        if seg_dur <= 0:
+            continue
+
+        overlay_dur = min(seg_dur, clip_dur)
+        if not first_overlay_done and overlay_dur < 1.0:
+            overlay_dur = min(1.0, clip_dur)
+
+        segments.append({
+            "path": broll_path,
+            "name": broll_name,
+            "start": start,
+            "dur": overlay_dur,
+            "has_audio": clip_has_audio,
+        })
+        used_brolls.append(broll_name)
+        first_overlay_done = True
+
+    if not segments:
+        broll_name = pick_loose_broll()
+        broll_path = os.path.join(proj_dir, "Broll", broll_name)
+        clip_dur, clip_has_audio = get_vid_info(broll_path)
+        overlay_dur = min(2.0, clip_dur) if clip_dur > 0 else 1.0
+        segments.append({
+            "path": broll_path,
+            "name": broll_name,
+            "start": 0.0,
+            "dur": overlay_dur,
+            "has_audio": clip_has_audio,
+        })
+        used_brolls.append(broll_name)
+
+    # Giữ tỷ lệ broll/base theo config (mặc định 50/50)
+    ratio = config.get("base_broll_ratio", 0.5)
+    try:
+        ratio = float(ratio)
+    except Exception:
+        ratio = 0.5
+    ratio = max(0.0, min(1.0, ratio))
+
+    target_broll_dur = voice_dur * ratio
+    if target_broll_dur > 0 and segments:
+        trimmed = []
+        remaining = target_broll_dur
+        for seg in segments:
+            if remaining <= 0:
+                break
+            seg_dur = max(0.0, float(seg.get("dur", 0.0)))
+            if seg_dur <= 0:
+                continue
+            use_dur = min(seg_dur, remaining)
+            trimmed.append({**seg, "dur": use_dur})
+            remaining -= use_dur
+        if trimmed:
+            segments = trimmed
+
+        # Rải cảnh trám đều theo timeline (giữ cảnh đầu ở đầu video).
+        if segments:
+            first = segments[0]
+            first["start"] = 0.0
+            remaining_segments = segments[1:]
+            if remaining_segments and voice_dur > 0:
+                base_start = max(0.0, float(first.get("dur", 0.0)))
+                available = max(0.0, voice_dur - base_start)
+                step = available / (len(remaining_segments) + 1)
+                last_end = base_start
+                min_gap = 0.2
+                for idx, seg in enumerate(remaining_segments, 1):
+                    seg_dur = max(0.0, float(seg.get("dur", 0.0)))
+                    if seg_dur <= 0:
+                        seg["start"] = last_end
+                        continue
+                    desired = base_start + step * idx - (seg_dur / 2.0)
+                    start = max(0.0, min(desired, max(0.0, voice_dur - seg_dur)))
+                    if start < last_end + min_gap:
+                        start = min(last_end + min_gap, max(0.0, voice_dur - seg_dur))
+                    seg["start"] = start
+                    last_end = start + seg_dur
+
+    inputs = ["-i", voice_path]
+    v_filters = []
+    a_filters = []
+    overlay_chain = "[basev]"
+
+    v_filters.append(
+        "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,"
+        f"lutyuv=y=val*{bright_val},fps=30,format=yuv420p,setsar=1[basev]"
+    )
+
+    audio_inputs = []
+    if voice_has_audio:
+        a_filters.append("[0:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo[basea]")
+        audio_inputs.append("[basea]")
+
+    for idx, seg in enumerate(segments, 1):
+        inputs.extend(["-i", seg["path"]])
+        start_t = 0.0
+        end_t = seg["dur"]
+        v_filters.append(
+            f"[{idx}:v]trim={start_t:.3f}:{end_t:.3f},setpts=PTS-STARTPTS+{seg['start']:.3f}/TB,"
+            "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,"
+            f"fps=30,format=yuva420p[ovv{idx}]"
+        )
+        v_filters.append(
+            f"{overlay_chain}[ovv{idx}]overlay=0:0:eof_action=pass[v{idx}]"
+        )
+        overlay_chain = f"[v{idx}]"
+
+        keep_audio = broll_data.get(seg["name"], {}).get("keep_audio", False)
+        if keep_audio and seg["has_audio"] and broll_vol > 0:
+            delay_ms = int(seg["start"] * 1000)
+            a_filters.append(
+                f"[{idx}:a]atrim={start_t:.3f}:{end_t:.3f},asetpts=PTS-STARTPTS,"
+                f"aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,volume={broll_vol},"
+                f"adelay={delay_ms}|{delay_ms}[ba{idx}]"
+            )
+            audio_inputs.append(f"[ba{idx}]")
+
+    outv_map = overlay_chain
+
+    if audio_inputs:
+        if len(audio_inputs) > 1:
+            mix_flt = f"{''.join(audio_inputs)}amix=inputs={len(audio_inputs)}:duration=first:dropout_transition=0:normalize=0[outa]"
+            a_filters.append(mix_flt)
+            outa_map = "[outa]"
+        else:
+            outa_map = audio_inputs[0]
+    else:
+        outa_map = None
+
+    filter_complex = ";\n".join(v_filters + a_filters)
+    filter_script_path = os.path.join(out_dir, f"filter_base_{os.path.splitext(voice_name)[0]}.txt")
+    with open(filter_script_path, "w", encoding="utf-8") as f:
+        f.write(filter_complex)
+
+    creation_flags = 0x08000000 if os.name == "nt" else 0
+    temp_main_mp4 = os.path.join(out_dir, f"temp_main_{os.path.splitext(voice_name)[0]}.mp4")
+
+    log_cb(f"[{voice_name}] Đang render video nền + chèn cảnh trám...")
+    ffmpeg_cmd = ["ffmpeg", "-y"] + inputs + [
+        *FFMPEG_FILTER_MEMORY_GUARD,
+        "-filter_complex_script", filter_script_path,
+        "-map", outv_map,
+    ]
+    if outa_map:
+        ffmpeg_cmd += ["-map", outa_map]
+    ffmpeg_cmd += [
+        "-c:v", "h264_nvenc", "-preset", "p1", "-b:v", "8000k",
+        "-c:a", "aac", "-b:a", "192k",
+        "-shortest",
+        temp_main_mp4,
+    ]
+
+    with ffmpeg_heavy_render_lock:
+        process = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore", creationflags=creation_flags)
+    if process.returncode != 0:
+        raise Exception(f"Lỗi FFmpeg: {process.stderr[-1500:]}")
+
+    safe_stem = os.path.splitext(voice_name)[0]
+    temp_token = f"{safe_stem}_{int(time.time() * 1000)}_{threading.get_ident()}"
+    temp_frame_jpg = os.path.join(out_dir, f"temp_frame_{temp_token}.jpg")
+    temp_cover_png = os.path.join(out_dir, f"temp_cover_{temp_token}.png")
+
+    extract_points = []
+    if voice_dur > 2.0:
+        random_sec = round(random.uniform(1.0, max(1.1, voice_dur - 1.0)), 2)
+        extract_points = [random_sec, round(voice_dur / 2, 2), 0.5]
+    else:
+        extract_points = [0.0]
+
+    frame_ready = False
+    frame_error = ""
+    for point in extract_points:
+        frame_result = subprocess.run(
+            ["ffmpeg", "-y", "-ss", f"{point:.2f}", "-i", temp_main_mp4, "-frames:v", "1", "-q:v", "2", temp_frame_jpg],
+            capture_output=True, text=True, encoding="utf-8", errors="ignore", creationflags=creation_flags,
+        )
+        if frame_result.returncode == 0 and os.path.exists(temp_frame_jpg) and os.path.getsize(temp_frame_jpg) > 0:
+            frame_ready = True
+            break
+        frame_error = (frame_result.stderr or frame_result.stdout or "Không rõ lỗi")[-400:]
+
+    if not frame_ready:
+        try:
+            img = Image.new("RGBA", (1080, 1920), (22, 28, 36, 255))
+            draw = ImageDraw.Draw(img)
+            clean_proj_name = " ".join(proj_name.replace("_", " ").split()).upper()
+            display_text, font, stroke_w, line_spacing = _choose_cover_layout(draw, clean_proj_name, 1080, 1920, custom_font)
+            draw.multiline_text(
+                (540, 960),
+                display_text,
+                font=font,
+                fill="white",
+                align="center",
+                anchor="mm",
+                spacing=line_spacing,
+                stroke_width=stroke_w,
+                stroke_fill="black",
+            )
+            img.convert("RGB").save(temp_cover_png)
+            frame_ready = True
+            log_cb(f"[{voice_name}] ⚠️ Không trích được frame làm bìa, dùng bìa nền dự phòng. {frame_error[:120]}")
+        except Exception as e:
+            frame_error = str(e)
+
+    final_video_ready = False
+    if frame_ready:
+        try:
+            if os.path.exists(temp_frame_jpg) and os.path.getsize(temp_frame_jpg) > 0:
+                with Image.open(temp_frame_jpg).convert("RGBA") as img:
+                    draw = ImageDraw.Draw(img)
+                    img_w, img_h = img.size
+                    clean_proj_name = " ".join(proj_name.replace("_", " ").split()).upper()
+                    display_text, font, stroke_w, line_spacing = _choose_cover_layout(draw, clean_proj_name, img_w, img_h, custom_font)
+                    draw.multiline_text(
+                        (img_w / 2, img_h / 2),
+                        display_text,
+                        font=font,
+                        fill="white",
+                        align="center",
+                        anchor="mm",
+                        spacing=line_spacing,
+                        stroke_width=stroke_w,
+                        stroke_fill="black",
+                    )
+                    img.convert("RGB").save(temp_cover_png)
+
+            ffmpeg_concat_cmd = [
+                "ffmpeg", "-y", "-loop", "1", "-t", "0.1", "-i", temp_cover_png, "-i", temp_main_mp4,
+                "-filter_complex", "[0:v][1:v]concat=n=2:v=1:a=0[v]", "-map", "[v]", "-map", "1:a",
+                "-c:v", "h264_nvenc", "-preset", "p1", "-b:v", "8000k", "-c:a", "copy", out_file,
+            ]
+            concat_result = subprocess.run(ffmpeg_concat_cmd, capture_output=True, text=True, errors="ignore", creationflags=creation_flags)
+            final_video_ready = concat_result.returncode == 0 and os.path.exists(out_file) and os.path.getsize(out_file) > 0
+
+            if not final_video_ready:
+                ffmpeg_concat_fallback_cmd = [
+                    "ffmpeg", "-y", "-loop", "1", "-t", "0.1", "-i", temp_cover_png, "-i", temp_main_mp4,
+                    "-filter_complex", "[0:v][1:v]concat=n=2:v=1:a=0[v]", "-map", "[v]", "-map", "1:a",
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-c:a", "aac", "-b:a", "192k", out_file,
+                ]
+                concat_fallback_result = subprocess.run(ffmpeg_concat_fallback_cmd, capture_output=True, text=True, errors="ignore", creationflags=creation_flags)
+                final_video_ready = concat_fallback_result.returncode == 0 and os.path.exists(out_file) and os.path.getsize(out_file) > 0
+                if final_video_ready:
+                    log_cb(f"[{voice_name}] ⚠️ NVENC gắn bìa lỗi, đã fallback sang libx264 thành công.")
+        except Exception:
+            pass
+
+    if not final_video_ready:
+        log_cb(f"[{voice_name}] ⚠️ Không gắn được bìa, xuất video gốc không bìa. {frame_error[:120]}")
+        shutil.copy2(temp_main_mp4, out_file)
+        final_video_ready = os.path.exists(out_file) and os.path.getsize(out_file) > 0
+
+    if not final_video_ready:
+        raise Exception(f"Không lưu được video đầu ra cho {voice_name}")
+
+    for f_path in [filter_script_path, temp_main_mp4, temp_frame_jpg, temp_cover_png]:
+        if os.path.exists(f_path):
+            try:
+                os.remove(f_path)
+            except Exception:
+                pass
+
+    return list(dict.fromkeys(used_brolls))

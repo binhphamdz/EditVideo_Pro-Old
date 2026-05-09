@@ -162,16 +162,18 @@ class WebAutoPostTab:
         self.lbl_job_summary.pack(side="left")
         tk.Button(top_jobs, text="🔄 Làm mới", bg="#34495e", fg="white", font=("Arial", 9, "bold"), command=self.refresh_jobs_preview).pack(side="right")
 
-        cols = ("stt", "video", "product", "status")
+        cols = ("stt", "video", "product", "tiktok", "status")
         self.tree_jobs = ttk.Treeview(jobs_frame, columns=cols, show="headings", height=18)
         self.tree_jobs.heading("stt", text="ID")
         self.tree_jobs.heading("video", text="Tên Video")
         self.tree_jobs.heading("product", text="Tên Sản Phẩm")
+        self.tree_jobs.heading("tiktok", text="Link TikTok")
         self.tree_jobs.heading("status", text="Trạng thái")
 
         self.tree_jobs.column("stt", width=60, anchor="center")
         self.tree_jobs.column("video", width=220, anchor="w")
         self.tree_jobs.column("product", width=170, anchor="w")
+        self.tree_jobs.column("tiktok", width=220, anchor="w")
         self.tree_jobs.column("status", width=160, anchor="center")
 
         self.tree_jobs.tag_configure("done", foreground="#27ae60")
@@ -273,7 +275,7 @@ class WebAutoPostTab:
         for item in self.tree_jobs.get_children():
             self.tree_jobs.delete(item)
 
-        jobs = load_shopee_jobs()
+        jobs = load_shopee_jobs(profile_name=self.main_app.get_active_profile_name())
         pending_count, processing_count, done_count = 0, 0, 0
 
         for job in jobs:
@@ -290,10 +292,12 @@ class WebAutoPostTab:
                 tag = "pending"
                 pending_count += 1
 
+            # Lấy link TikTok từ job nếu có, hoặc từ project data nếu cần
+            tiktok_link = job.get("tiktok_link", "")
             self.tree_jobs.insert(
                 "",
                 "end",
-                values=(job.get("stt", ""), job.get("video_name", ""), job.get("product_name", ""), status),
+                values=(job.get("stt", ""), job.get("video_name", ""), job.get("product_name", ""), tiktok_link, status),
                 tags=(tag,),
             )
 
@@ -326,13 +330,13 @@ class WebAutoPostTab:
         self.set_status("⏹ Đang dừng Tab 13...", "#c0392b")
 
     def _set_job_status(self, video_name, status):
-        update_shopee_status(video_name, status)
+        update_shopee_status(video_name, status, profile_name=self.main_app.get_active_profile_name())
         self.parent.after(0, self.refresh_jobs_preview)
 
     def _run_web_worker(self):
         try:
             while self.is_running:
-                current_job = claim_next_shopee_job("WEB")
+                current_job = claim_next_shopee_job("WEB", profile_name=self.main_app.get_active_profile_name())
                 self.parent.after(0, self.refresh_jobs_preview)
                 if not current_job:
                     self.parent.after(0, lambda: self.set_status("🎉 Tab 13 xong hết job.", "green"))
@@ -517,6 +521,22 @@ class WebAutoPostTab:
             raise RuntimeError("Không thấy nút thêm sản phẩm đầu tiên.")
 
         time.sleep(1)
+        # Scroll và kiểm tra nút Đăng khả dụng, thấy là bấm ngay
+        max_wait = 12 * 60  # 12 phút
+        waited = 0
+        post_btn = page.locator('button[data-e2e="post_video_button"]:not([aria-disabled="true"]):not([data-disabled="true"])')
+        while waited < max_wait:
+            try:
+                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            except Exception:
+                pass
+            time.sleep(1)
+            if post_btn.count() > 0 and post_btn.is_enabled():
+                break
+            waited += 1
+        else:
+            raise RuntimeError("Không tìm thấy nút Đăng khả dụng!")
+
         self._click_any(page, [
             "button:has-text('Đăng')",
             "button:has-text('Post')",
@@ -524,7 +544,12 @@ class WebAutoPostTab:
             "text=Đăng",
             "text=Post",
         ])
-        time.sleep(3)
+        # Chờ trang load sau khi đăng (nút Đăng biến mất hoặc chờ thêm 5s)
+        for _ in range(30):
+            if post_btn.count() == 0:
+                break
+            time.sleep(1)
+        time.sleep(5)
 
     def _click_any(self, page, selectors):
         last_error = None

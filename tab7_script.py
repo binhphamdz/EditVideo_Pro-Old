@@ -98,12 +98,8 @@ class ScriptTab:
         tk.Radiobutton(fr_mode, text="Groq (Tốn API)", variable=self.boc_bang_mode, value="groq", bg="#ffffff").pack(side="left")
         # =======================================================
 
-        fr_kie = tk.Frame(input_fr, bg="#ffffff")
-        fr_kie.pack(fill="x", pady=(0, 5))
-        tk.Label(fr_kie, text="Kie Key:", font=("Arial", 9, "bold"), fg="#8e44ad", bg="#ffffff").pack(side="left")
-        self.ent_kie = tk.Entry(fr_kie, width=25, font=("Arial", 10))
-        self.ent_kie.insert(0, self.main_app.config.get("kie_key", "")) 
-        self.ent_kie.pack(side="left", fill="x", expand=True, padx=5)
+        # [INFO] Các API Keys được cấu hình tại Tab 10
+        tk.Label(input_fr, text="⚙️ Cấu hình AI Keys & Models tại Tab 10 - Config", bg="#ffffff", font=("Arial", 9, "bold", "italic"), fg="#e74c3c").pack(anchor="w", pady=(10, 5))
 
         tk.Label(input_fr, text="Lệnh Xào Nấu (Phong cách KOC):", bg="#ffffff", font=("Arial", 9, "bold")).pack(anchor="w")
         self.txt_setting = tk.Text(input_fr, height=7, font=("Arial", 10), bg="#f9ebea")
@@ -356,8 +352,9 @@ Output:
             with open(path_spun, 'w', encoding='utf-8') as f: f.write(self.txt_spun.get("1.0", tk.END).strip())
             messagebox.showinfo("Thành công", "Đã lưu Kịch Bản Xào!")
 
-    def add_log(self, msg):
+    def add_log(self, msg, provider=None):
         self.main_app.root.after(0, self._insert_log, msg)
+        self.main_app.log_event("tab7", msg, provider or "system")
 
     def _insert_log(self, msg):
         self.txt_log.config(state="normal")
@@ -404,26 +401,47 @@ Output:
     # --- CHẠY GỌI AI ---
     def extract_keys_ai(self):
         orig_text = self.txt_original.get("1.0", tk.END).strip()
-        kie_key = self.ent_kie.get().strip()
         
         if not orig_text: return messagebox.showerror("Lỗi", "Chưa có kịch bản gốc!")
-        if not kie_key: return messagebox.showerror("Lỗi", "Chưa nhập Kie Key!")
-            
-        self.main_app.config["kie_key"] = kie_key
-        self.main_app.save_config()
-        self.add_log("⏳ Đang bắn luồng cho AI bóc Sản phẩm và 10 Key...")
-        self.ai_handler.extract_info_and_keys(orig_text, kie_key)
+        
+        # Xào kịch bản dùng ChatGPT riêng
+        provider = "openai"
+        model = self.spin_model_var.get().strip() or self.main_app.config.get("tab7_spin_model", "gpt-4o")
+        api_key = self.main_app.config.get("openai_key", "")
+        if not api_key:
+            return messagebox.showerror("Lỗi", "Chưa cấu hình OpenAI Key! Vui lòng cài đặt trong Tab 10 - Config.")
+        
+        self.add_log(f"⏳ Đang bắn luồng cho {provider.upper()} bóc Sản phẩm và 10 Key...")
+        self.ai_handler.extract_info_and_keys(orig_text, api_key, provider, model)
 
     def spin_script_ai(self):
         orig_text = self.txt_original.get("1.0", tk.END).strip()
         system_prompt = self.txt_setting.get("1.0", tk.END).strip()
-        kie_key = self.ent_kie.get().strip()
         
         all_keys = [self.tree_keys.item(c)["values"][0] for c in self.tree_keys.get_children()]
         all_prods = [self.tree_prod.item(c)["values"][0] for c in self.tree_prod.get_children()]
         
         if not orig_text: return messagebox.showerror("Lỗi", "Chưa có kịch bản gốc!")
-        if not kie_key: return messagebox.showerror("Lỗi", "Chưa nhập Kie Key!")
+        
+        # Lấy thông tin provider và API key từ config
+        provider = self.main_app.config.get("ai_provider", "kie")
+        if provider == "openai":
+            model = self.main_app.config.get("openai_model", "gpt-4o")
+        elif provider == "shopaikey":
+            model = self.main_app.config.get("gemini_model", "gemini-2.5-flash:generateContent")
+        else:
+            model = self.main_app.config.get("kie_model", "gemini-3-flash")
+        
+        # Kiểm tra API key theo provider
+        if provider == "shopaikey":
+            key_field = "shopaikey_key"
+        elif provider == "openai":
+            key_field = "openai_key"
+        else:
+            key_field = "kie_key"
+        api_key = self.main_app.config.get(key_field, "")
+        if not api_key:
+            return messagebox.showerror("Lỗi", f"Chưa cấu hình {key_field.replace('_', ' ').title()}! Vui lòng cài đặt trong Tab 10 - Config.")
         
         # BẮT SỰ KIỆN: Xem người dùng đang Click chọn ý nào trong 2 Bảng
         selected_hook = ""
@@ -446,7 +464,7 @@ Output:
         prod_text = "\n".join([f"- {p}" for p in all_prods])
         
         # Truyền cái selected_hook vào cho đệ tử AI
-        self.ai_handler.spin_script_ai(orig_text, system_prompt, prod_text, keys_text, selected_hook, kie_key)
+        self.ai_handler.spin_script_ai(orig_text, system_prompt, prod_text, keys_text, selected_hook, api_key, provider, model)
 
     def _process_ai_result(self, text, task_type):
         import re

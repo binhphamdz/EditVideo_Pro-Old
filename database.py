@@ -49,6 +49,13 @@ def init_db():
     except Exception:
         pass  # Cột đã tồn tại, bỏ qua
 
+    # [MIGRATION] Thêm cột srt_origin vào voices nếu DB cũ chưa có
+    try:
+        cursor.execute("ALTER TABLE voices ADD COLUMN srt_origin INTEGER DEFAULT 0")
+        conn.commit()
+    except Exception:
+        pass  # Cột đã tồn tại, bỏ qua
+
     # [MIGRATION] Lưu timeline vào DB thay cho project_data.json
     try:
         cursor.execute("ALTER TABLE projects ADD COLUMN timeline_json TEXT DEFAULT '[]'")
@@ -92,6 +99,7 @@ def init_db():
             file_name TEXT NOT NULL,
             usage_count INTEGER DEFAULT 0,
             srt_cache TEXT,
+            srt_origin INTEGER DEFAULT 0,
             last_used TIMESTAMP, 
             status TEXT DEFAULT 'active',
             FOREIGN KEY (project_id) REFERENCES projects (id) ON DELETE CASCADE,
@@ -143,6 +151,47 @@ def init_db():
         )
     ''')
 
+    # 6. Bảng Script Styles (Phong cách kịch bản)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS script_styles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            profile_name TEXT NOT NULL,
+            name TEXT NOT NULL,
+            prompt TEXT NOT NULL,
+            notes TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(profile_name, name)
+        )
+    ''')
+
+    # 7. Bảng Script Style Samples (SRT dùng để học phong cách)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS script_style_samples (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            style_id INTEGER NOT NULL,
+            source_name TEXT,
+            srt_text TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (style_id) REFERENCES script_styles (id) ON DELETE CASCADE
+        )
+    ''')
+
+    # 8. Bảng Project Scripts (Kịch bản theo project)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS project_scripts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER NOT NULL,
+            title TEXT,
+            content TEXT NOT NULL,
+            keys_json TEXT,
+            style_id INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (project_id) REFERENCES projects (id) ON DELETE CASCADE,
+            FOREIGN KEY (style_id) REFERENCES script_styles (id) ON DELETE SET NULL
+        )
+    ''')
+
     conn.commit()
     conn.close()
 
@@ -163,13 +212,23 @@ def log_rendered_video(project_name, voice_name, file_path):
         finally:
             conn.close()
 
-def get_all_rendered_videos():
-    """Lấy toàn bộ danh sách video thành phẩm, mới nhất lên trên"""
+def get_all_rendered_videos(profile_name=None):
+    """Lấy danh sách video thành phẩm, mới nhất lên trên."""
     with db_lock:
         conn = get_connection()
         try:
             cursor = conn.cursor()
-            cursor.execute("SELECT created_at, project_name, voice_name, file_path, status FROM rendered_videos ORDER BY id DESC")
+            if profile_name:
+                names = get_project_names_for_profile(profile_name)
+                if not names:
+                    return []
+                placeholders = ",".join(["?"] * len(names))
+                cursor.execute(
+                    f"SELECT created_at, project_name, voice_name, file_path, status FROM rendered_videos WHERE project_name IN ({placeholders}) ORDER BY id DESC",
+                    names,
+                )
+            else:
+                cursor.execute("SELECT created_at, project_name, voice_name, file_path, status FROM rendered_videos ORDER BY id DESC")
             return cursor.fetchall()
         finally:
             conn.close()
@@ -204,14 +263,220 @@ def delete_rendered_videos(file_paths):
         finally:
             conn.close()
 
-def get_pending_rendered_videos():
-    """Lấy các video chưa chuyển sang iPhone (dùng cho bot iCloud)"""
+def get_pending_rendered_videos(profile_name=None):
+    """Lấy các video chưa chuyển sang iPhone (dùng cho bot iCloud)."""
     with db_lock:
         conn = get_connection()
         try:
             cursor = conn.cursor()
-            cursor.execute("SELECT file_path FROM rendered_videos WHERE status != 'Đã chuyển'")
-            return [r['file_path'] for r in cursor.fetchall()]
+            if profile_name:
+                names = get_project_names_for_profile(profile_name)
+                if not names:
+                    return []
+                placeholders = ",".join(["?"] * len(names))
+                cursor.execute(
+                    f"SELECT file_path FROM rendered_videos WHERE status != 'Đã chuyển' AND project_name IN ({placeholders})",
+                    names,
+                )
+            else:
+                cursor.execute("SELECT file_path FROM rendered_videos WHERE status != 'Đã chuyển'")
+            return [r["file_path"] for r in cursor.fetchall()]
+        finally:
+            conn.close()
+
+
+def upsert_script_style(profile_name, name, prompt, notes=""):
+    profile_name = str(profile_name or "").strip()
+    name = str(name or "").strip()
+    prompt = str(prompt or "").strip()
+    notes = str(notes or "").strip()
+    if not profile_name or not name or not prompt:
+        return None
+
+    with db_lock:
+        conn = get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO script_styles (profile_name, name, prompt, notes)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(profile_name, name) DO UPDATE SET
+                    prompt=excluded.prompt,
+                    notes=excluded.notes,
+                    updated_at=CURRENT_TIMESTAMP
+                """,
+                (profile_name, name, prompt, notes),
+            )
+            conn.commit()
+            cursor.execute(
+                "SELECT id FROM script_styles WHERE profile_name = ? AND name = ?",
+                (profile_name, name),
+            )
+            row = cursor.fetchone()
+            return row["id"] if row else None
+        finally:
+            conn.close()
+
+
+def add_script_style_sample(style_id, source_name, srt_text):
+    if not style_id:
+        return
+    with db_lock:
+        conn = get_connection()
+        try:
+            conn.execute(
+                "INSERT INTO script_style_samples (style_id, source_name, srt_text) VALUES (?, ?, ?)",
+                (style_id, str(source_name or "").strip(), str(srt_text or "")),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def list_script_styles(profile_name):
+    profile_name = str(profile_name or "").strip()
+    if not profile_name:
+        return []
+    with db_lock:
+        conn = get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT id, name, prompt, notes, updated_at FROM script_styles WHERE profile_name = ? ORDER BY updated_at DESC",
+                (profile_name,),
+            )
+            return cursor.fetchall()
+        finally:
+            conn.close()
+
+
+def add_project_script(project_name, title, content, keys=None, style_id=None):
+    project_name = str(project_name or "").strip()
+    content = str(content or "").strip()
+    if not project_name or not content:
+        return None
+
+    keys_json = ""
+    try:
+        keys_json = json.dumps(keys or [], ensure_ascii=False)
+    except Exception:
+        keys_json = ""
+
+    with db_lock:
+        conn = get_connection()
+        try:
+            cursor = conn.cursor()
+            project_id = get_or_create_project(project_name)
+            cursor.execute(
+                """
+                INSERT INTO project_scripts (project_id, title, content, keys_json, style_id)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (project_id, str(title or "").strip(), content, keys_json, style_id),
+            )
+            conn.commit()
+            return cursor.lastrowid
+        finally:
+            conn.close()
+
+
+def list_project_scripts(project_name):
+    project_name = str(project_name or "").strip()
+    if not project_name:
+        return []
+    with db_lock:
+        conn = get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT id FROM projects WHERE name = ?", (project_name,))
+            proj = cursor.fetchone()
+            if not proj:
+                return []
+            cursor.execute(
+                """
+                SELECT ps.id, ps.title, ps.created_at, ss.name as style_name
+                FROM project_scripts ps
+                LEFT JOIN script_styles ss ON ss.id = ps.style_id
+                WHERE ps.project_id = ?
+                ORDER BY ps.id DESC
+                """,
+                (proj["id"],),
+            )
+            return cursor.fetchall()
+        finally:
+            conn.close()
+
+
+def get_project_script(script_id):
+    with db_lock:
+        conn = get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT ps.id, ps.title, ps.content, ps.keys_json, ps.created_at, ps.style_id,
+                       ss.name as style_name, ss.prompt as style_prompt
+                FROM project_scripts ps
+                LEFT JOIN script_styles ss ON ss.id = ps.style_id
+                WHERE ps.id = ?
+                """,
+                (script_id,),
+            )
+            return cursor.fetchone()
+        finally:
+            conn.close()
+
+
+def delete_project_script(script_id):
+    with db_lock:
+        conn = get_connection()
+        try:
+            conn.execute("DELETE FROM project_scripts WHERE id = ?", (script_id,))
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def get_project_names_for_profile(profile_name):
+    """Lấy danh sách project_name theo profile để lọc dữ liệu."""
+    profile_name = str(profile_name or "").strip()
+    if not profile_name:
+        return []
+
+    with db_lock:
+        conn = get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT project_name FROM app_projects WHERE profile_name = ?",
+                (profile_name,),
+            )
+            return [row["project_name"] for row in cursor.fetchall()]
+        finally:
+            conn.close()
+
+
+def get_project_ids_for_profile(profile_name):
+    """Lấy danh sách project_id (bảng projects) theo profile."""
+    profile_name = str(profile_name or "").strip()
+    if not profile_name:
+        return []
+
+    with db_lock:
+        conn = get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT p.id
+                FROM projects p
+                JOIN app_projects ap ON ap.project_name = p.name
+                WHERE ap.profile_name = ?
+                """,
+                (profile_name,),
+            )
+            return [row["id"] for row in cursor.fetchall()]
         finally:
             conn.close()
 
@@ -289,6 +554,7 @@ def get_project_payload(project_name):
         "ref_img_2": "",
         "voice_usage": {},
         "voice_srt_cache": {},
+        "voice_srt_origin": {},
     }
 
     with db_lock:
@@ -331,13 +597,15 @@ def get_project_payload(project_name):
                 pass
 
             cursor.execute(
-                "SELECT file_name, usage_count, srt_cache FROM voices WHERE project_id = ?",
+                "SELECT file_name, usage_count, srt_cache, srt_origin FROM voices WHERE project_id = ?",
                 (db_proj_id,),
             )
             for row in cursor.fetchall():
                 payload["voice_usage"][row["file_name"]] = int(row["usage_count"] or 0)
                 if row["srt_cache"]:
                     payload["voice_srt_cache"][row["file_name"]] = row["srt_cache"]
+                if row["srt_origin"]:
+                    payload["voice_srt_origin"][row["file_name"]] = True
 
             cursor.execute(
                 "SELECT file_name, duration, description, usage_count, keep_audio, status FROM brolls WHERE project_id = ?",
@@ -402,29 +670,36 @@ def save_project_payload(project_name, payload, project_status="active"):
             # Voices: upsert usage + srt, giữ nguyên last_used/status đã có.
             voice_usage = payload.get("voice_usage", {}) or {}
             voice_srt = payload.get("voice_srt_cache", {}) or {}
+            voice_srt_origin = payload.get("voice_srt_origin", {}) or {}
 
             cursor.execute(
-                "SELECT file_name, last_used, status FROM voices WHERE project_id = ?",
+                "SELECT file_name, last_used, status, srt_origin FROM voices WHERE project_id = ?",
                 (db_proj_id,),
             )
-            existing_voice_meta = {r["file_name"]: (r["last_used"], r["status"] or "active") for r in cursor.fetchall()}
+            existing_voice_meta = {
+                r["file_name"]: (r["last_used"], r["status"] or "active", int(r["srt_origin"] or 0))
+                for r in cursor.fetchall()
+            }
 
             all_voice_names = set(voice_usage.keys()) | set(voice_srt.keys())
             for file_name in all_voice_names:
-                last_used, status = existing_voice_meta.get(file_name, (None, "active"))
+                last_used, status, existing_origin = existing_voice_meta.get(file_name, (None, "active", 0))
+                origin_val = int(voice_srt_origin.get(file_name, existing_origin) or 0)
                 cursor.execute(
                     """
-                    INSERT INTO voices (project_id, file_name, usage_count, srt_cache, last_used, status)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    INSERT INTO voices (project_id, file_name, usage_count, srt_cache, srt_origin, last_used, status)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(project_id, file_name) DO UPDATE SET
                         usage_count = excluded.usage_count,
-                        srt_cache = excluded.srt_cache
+                        srt_cache = excluded.srt_cache,
+                        srt_origin = excluded.srt_origin
                     """,
                     (
                         db_proj_id,
                         file_name,
                         int(voice_usage.get(file_name, 0) or 0),
                         str(voice_srt.get(file_name, "") or ""),
+                        origin_val,
                         last_used,
                         status,
                     ),
@@ -518,6 +793,115 @@ def rename_project_name_preserve_data(old_name, new_name, profile_name=None, pro
                 new_brolls = int(cursor.fetchone()["c"] or 0)
                 cursor.execute("SELECT COUNT(*) c FROM voices WHERE project_id = ?", (new_id,))
                 new_voices = int(cursor.fetchone()["c"] or 0)
+
+                # Nếu cả 2 bên đều có dữ liệu, thực hiện gộp an toàn.
+                if (old_brolls > 0 or old_voices > 0) and (new_brolls > 0 or new_voices > 0):
+                    # Gộp brolls: thêm file chưa có, cập nhật mô tả/âm thanh còn trống.
+                    cursor.execute(
+                        """
+                        INSERT OR IGNORE INTO brolls
+                        (project_id, file_name, duration, description, usage_count, keep_audio, status)
+                        SELECT ?, file_name, duration, description, usage_count, keep_audio, status
+                        FROM brolls
+                        WHERE project_id = ?
+                        """,
+                        (new_id, old_id),
+                    )
+                    cursor.execute(
+                        """
+                        UPDATE brolls
+                        SET
+                            description = CASE
+                                WHEN description IS NULL OR TRIM(description) = ''
+                                THEN (SELECT description FROM brolls b2 WHERE b2.project_id = ? AND b2.file_name = brolls.file_name)
+                                ELSE description
+                            END,
+                            keep_audio = CASE
+                                WHEN keep_audio = 0
+                                THEN COALESCE((SELECT keep_audio FROM brolls b2 WHERE b2.project_id = ? AND b2.file_name = brolls.file_name), keep_audio)
+                                ELSE keep_audio
+                            END,
+                            duration = CASE
+                                WHEN duration IS NULL OR duration = 0
+                                THEN COALESCE((SELECT duration FROM brolls b2 WHERE b2.project_id = ? AND b2.file_name = brolls.file_name), duration)
+                                ELSE duration
+                            END,
+                            usage_count = CASE
+                                WHEN COALESCE((SELECT usage_count FROM brolls b2 WHERE b2.project_id = ? AND b2.file_name = brolls.file_name), 0) > usage_count
+                                THEN (SELECT usage_count FROM brolls b2 WHERE b2.project_id = ? AND b2.file_name = brolls.file_name)
+                                ELSE usage_count
+                            END
+                        WHERE project_id = ?
+                        """,
+                        (old_id, old_id, old_id, old_id, old_id, new_id),
+                    )
+
+                    # Gộp voices: thêm file chưa có, cập nhật srt/usage còn trống.
+                    cursor.execute(
+                        """
+                        INSERT OR IGNORE INTO voices
+                        (project_id, file_name, usage_count, srt_cache, srt_origin, last_used, status)
+                        SELECT ?, file_name, usage_count, srt_cache, srt_origin, last_used, status
+                        FROM voices
+                        WHERE project_id = ?
+                        """,
+                        (new_id, old_id),
+                    )
+                    cursor.execute(
+                        """
+                        UPDATE voices
+                        SET
+                            srt_cache = CASE
+                                WHEN srt_cache IS NULL OR TRIM(srt_cache) = ''
+                                THEN (SELECT srt_cache FROM voices v2 WHERE v2.project_id = ? AND v2.file_name = voices.file_name)
+                                ELSE srt_cache
+                            END,
+                            srt_origin = CASE
+                                WHEN srt_origin IS NULL OR srt_origin = 0
+                                THEN COALESCE((SELECT srt_origin FROM voices v2 WHERE v2.project_id = ? AND v2.file_name = voices.file_name), srt_origin)
+                                ELSE srt_origin
+                            END,
+                            usage_count = CASE
+                                WHEN COALESCE((SELECT usage_count FROM voices v2 WHERE v2.project_id = ? AND v2.file_name = voices.file_name), 0) > usage_count
+                                THEN (SELECT usage_count FROM voices v2 WHERE v2.project_id = ? AND v2.file_name = voices.file_name)
+                                ELSE usage_count
+                            END,
+                            last_used = CASE
+                                WHEN last_used IS NULL
+                                THEN (SELECT last_used FROM voices v2 WHERE v2.project_id = ? AND v2.file_name = voices.file_name)
+                                ELSE last_used
+                            END
+                        WHERE project_id = ?
+                        """,
+                        (old_id, old_id, old_id, old_id, old_id, new_id),
+                    )
+
+                    # Dời scripts và job sang project mới.
+                    cursor.execute("UPDATE project_scripts SET project_id = ? WHERE project_id = ?", (new_id, old_id))
+                    cursor.execute("UPDATE shopee_jobs SET project_id = ? WHERE project_id = ?", (new_id, old_id))
+                    cursor.execute(
+                        "UPDATE rendered_videos SET project_name = ? WHERE project_name = ?",
+                        (new_name, old_name),
+                    )
+
+                    # Cập nhật mapping project theo profile/pid.
+                    if profile_name and project_pid:
+                        cursor.execute(
+                            "UPDATE app_projects SET project_name = ? WHERE profile_name = ? AND project_pid = ?",
+                            (new_name, str(profile_name), str(project_pid)),
+                        )
+                    else:
+                        cursor.execute(
+                            "UPDATE app_projects SET project_name = ? WHERE project_name = ?",
+                            (new_name, old_name),
+                        )
+
+                    # Xoá project cũ sau khi gộp.
+                    cursor.execute("DELETE FROM projects WHERE id = ?", (old_id,))
+                    conn.commit()
+                    return True, (
+                        f"Đã gộp dữ liệu vào project '{new_name}' (broll={new_brolls}, voice={new_voices})."
+                    )
 
                 # Nếu tên mới thực chất thuộc 1 project đã có dữ liệu,
                 # nhưng project hiện tại chỉ là row rỗng (thường do lệch rename cũ),

@@ -99,7 +99,7 @@ class TelegramBotManager:
         raw_lines = []
 
         try:
-            rows = database.get_all_rendered_videos()
+            rows = database.get_all_rendered_videos(self.get_active_profile_name())
             for row in rows:
                 total += 1
                 created = str(row['created_at'])[:10]  # "YYYY-MM-DD"
@@ -428,10 +428,14 @@ class TelegramBotManager:
             
             voice_usage_db = self.get_voice_usage()
             render_queue = [] 
+            profile_name = self.get_active_profile_name()
+            projects = self.main_app.load_projects_for_profile(profile_name)
             
-            for pid, pdata in self.main_app.projects.items():
+            for pid, pdata in projects.items():
+                if str(pdata.get("status", "active")) != "active":
+                    continue
                 pname = pdata.get('name', 'Unknown')
-                pdir = self.main_app.get_proj_dir(pid)
+                pdir = self.main_app.get_proj_dir(pid, profile_name)
                 vdir = os.path.join(pdir, "Voices")
                 
                 if os.path.exists(vdir):
@@ -455,10 +459,11 @@ class TelegramBotManager:
                         time.sleep(1.5)
                         
                     for future in concurrent.futures.as_completed(futures):
-                        try: 
-                            future.result()
-                            completed += 1
-                        except: pass
+                        try:
+                            if future.result():
+                                completed += 1
+                        except:
+                            pass
                 self.bot.send_message(chat_id, f"🎉 DẠ XONG! Chuyến xe Random đã xuất xưởng {completed}/{len(render_queue)} video.\nSếp gõ /icloud để nhận hàng nhé!")
                 try:
                     self.main_app.tab4.load_excel_data()
@@ -473,10 +478,11 @@ class TelegramBotManager:
             if not self.main_app.projects: return self.bot.send_message(chat_id, "❌ Kho trống trơn sếp ơi!")
             
             current_profile = self.get_active_profile_name()
-            proj_list = [(pid, p.get('name')) for pid, p in self.main_app.projects.items()]
+            proj_list = [(pid, p.get('name'), p.get('status', 'active')) for pid, p in self.main_app.projects.items()]
             msg = f"📁 **CHỌN NHIỀU DỰ ÁN ĐỂ CHẠY TỰ ĐỘNG - {current_profile}:**\n\n"
-            for i, (p, n) in enumerate(proj_list, 1):
-                msg += f" {i}. {n}\n"
+            for i, (p, n, st) in enumerate(proj_list, 1):
+                status_text = "🟢" if str(st) == "active" else "🔴"
+                msg += f" {i}. {status_text} {n}\n"
             msg += "\n👇 Sếp nhắn **các số thứ tự** cách nhau bằng dấu phẩy nhé (VD: 1,3,5):"
             
             with self.session_lock:
@@ -508,7 +514,10 @@ class TelegramBotManager:
             msg_log = "🎲 **Báo cáo kết quả đi chợ (Ưu tiên Voice ít dùng):**\n"
 
             profile_name = sess.get('profile_name', self.get_active_profile_name())
-            for pid, proj_name in selected_projects:
+            for pid, proj_name, proj_status in selected_projects:
+                if str(proj_status) != "active":
+                    msg_log += f"⛔ `{proj_name}`: Đang đóng băng, bỏ qua!\n"
+                    continue
                 pdir = self.main_app.get_proj_dir(pid, profile_name)
                 vdir = os.path.join(pdir, "Voices")
                 if os.path.exists(vdir):
@@ -542,10 +551,11 @@ class TelegramBotManager:
                         time.sleep(1.5)
                         
                     for future in concurrent.futures.as_completed(futures):
-                        try: 
-                            future.result()
-                            completed += 1
-                        except: pass
+                        try:
+                            if future.result():
+                                completed += 1
+                        except:
+                            pass
                 
                 self.bot.send_message(chat_id, f"🎉 DẠ XONG! Chuyến xe Multi-Project đã xuất xưởng {completed}/{len(render_queue)} video.\nSếp gõ /icloud để nhận hàng nhé!")
                 try:
@@ -611,8 +621,12 @@ class TelegramBotManager:
             chat_id = message.chat.id
             if not self.main_app.projects: return self.bot.send_message(chat_id, "Kho trống trơn sếp ơi!")
             current_profile = self.get_active_profile_name()
-            proj_list = [(pid, p.get('name')) for pid, p in self.main_app.projects.items()]
-            msg = f"📁 **Dự án nhà mình - {current_profile}:**\n" + "".join([f" {i}. {n}\n" for i, (p, n) in enumerate(proj_list, 1)]) + "\n👇 Sếp nhắn **số thứ tự** Project nhé:"
+            proj_list = [(pid, p.get('name'), p.get('status', 'active')) for pid, p in self.main_app.projects.items()]
+            msg_lines = []
+            for i, (p, n, st) in enumerate(proj_list, 1):
+                status_text = "🟢" if str(st) == "active" else "🔴"
+                msg_lines.append(f" {i}. {status_text} {n}")
+            msg = f"📁 **Dự án nhà mình - {current_profile}:**\n" + "\n".join(msg_lines) + "\n\n👇 Sếp nhắn **số thứ tự** Project nhé:"
             with self.session_lock:
                 self.bot_sessions[chat_id] = {'proj_list': proj_list, 'profile_name': current_profile}
             self.bot.register_next_step_handler(self.bot.send_message(chat_id, msg, parse_mode="Markdown"), process_project_choice)
@@ -627,12 +641,15 @@ class TelegramBotManager:
                 idx = int(message.text.strip()) - 1
                 if idx < 0 or idx >= len(sess['proj_list']):
                     return self.bot.send_message(chat_id, "❌ Số không hợp lệ sếp ơi!")
-                pid, proj_name = sess['proj_list'][idx]
+                pid, proj_name, proj_status = sess['proj_list'][idx]
             except ValueError:
                 return self.bot.send_message(chat_id, "Sếp gõ sai số rồi!")
             except Exception as e:
                 print(f"⚠️ Lỗi process_project_choice: {e}")
                 return self.bot.send_message(chat_id, f"❌ Lỗi: {str(e)[:50]}")
+
+            if str(proj_status) != "active":
+                return self.bot.send_message(chat_id, f"⛔ Project `{proj_name}` đang đóng băng, mở lại rồi hãy render nhé.")
             
             profile_name = sess.get('profile_name', self.get_active_profile_name())
             pdir = self.main_app.get_proj_dir(pid, profile_name); vdir = os.path.join(pdir, "Voices")
@@ -680,9 +697,10 @@ class TelegramBotManager:
                     
                     for future in concurrent.futures.as_completed(futures):
                         try:
-                            future.result()
-                            completed += 1
-                        except: pass
+                            if future.result():
+                                completed += 1
+                        except:
+                            pass
                         
                 self.bot.send_message(chat_id, f"🎉 DẠ XONG đơn của sếp ({completed}/{len(selected)} video)!")
                 try:

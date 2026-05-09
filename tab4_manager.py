@@ -106,6 +106,17 @@ class ManagerTab:
             command=self.export_selected_for_3utools
         ).pack(side="left", padx=10)
 
+        tk.Button(
+            btn_frame,
+            text="☑ Chọn tất cả",
+            bg="#16a085",
+            fg="white",
+            font=("Arial", 11, "bold"),
+            padx=16,
+            pady=5,
+            command=self.select_all_videos
+        ).pack(side="left", padx=10)
+
         # =======================================================
         # [MỚI] NÚT BẬT TRẠM PHÁT SÓNG WIFI NỘI BỘ
         # =======================================================
@@ -148,6 +159,10 @@ class ManagerTab:
                 self.tree.selection_set(item)
             self.context_menu.post(event.x_root, event.y_root)
 
+    def select_all_videos(self):
+        for item in self.tree.get_children():
+            self.tree.selection_add(item)
+
     def load_excel_data(self):
         """Đọc danh sách video thành phẩm từ Database và nhồi vào bảng"""
         import database
@@ -158,7 +173,7 @@ class ManagerTab:
 
         # 2. Đọc dữ liệu từ Database
         try:
-            rows = database.get_all_rendered_videos()
+            rows = database.get_all_rendered_videos(self.main_app.get_active_profile_name())
             for r in rows:
                 created_at = str(r['created_at'])[:16]  # Cắt bỏ giây
                 project_name = r['project_name']
@@ -285,7 +300,9 @@ class ManagerTab:
                 bot.send_message(chat_id, "❌ Lỗi: PC chưa cài đặt thư mục iCloud! Bác hãy mở Tool trên máy tính, chuyển thử 1 video để cài đặt thư mục trước nhé.")
             return
 
-        pending_files = [p for p in database.get_pending_rendered_videos() if os.path.exists(p)]
+        pending_files = [
+            p for p in database.get_pending_rendered_videos(self.main_app.get_active_profile_name()) if os.path.exists(p)
+        ]
 
         if not pending_files:
             if bot and chat_id:
@@ -359,9 +376,11 @@ class ManagerTab:
         try:
             success_names = [os.path.basename(p) for p in deletable_db_paths]
             if success_names:
-                delete_shopee_jobs(success_names, config=self.main_app.config)
+                delete_shopee_jobs(success_names, config=self.main_app.config, profile_name=self.main_app.get_active_profile_name())
             if hasattr(self.main_app, "tab11"):
                 self.main_app.root.after(0, self.main_app.tab11.refresh_jobs_preview)
+            if hasattr(self.main_app, "tab13"):
+                self.main_app.root.after(0, self.main_app.tab13.refresh_jobs_preview)
         except Exception as e:
             print(f"Không xóa được job Shopee tương ứng: {e}")
 
@@ -558,7 +577,7 @@ class ManagerTab:
                         status_map = {}
                         try:
                             import database
-                            for r in database.get_all_rendered_videos():
+                            for r in database.get_all_rendered_videos(self.main_app.get_active_profile_name()):
                                 status_map[os.path.basename(r['file_path'])] = r['status']
                         except: pass
 
