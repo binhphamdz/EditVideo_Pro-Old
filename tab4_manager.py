@@ -10,12 +10,13 @@ import threading
 import http.server
 import socketserver
 
-from shopee_export import delete_shopee_jobs
+from shopee_export import delete_shopee_jobs, normalize_shopee_product_link, normalize_tiktok_product_link, upsert_manual_tiktok_job
 
 class ManagerTab:
     def __init__(self, parent, main_app):
         self.parent = parent
         self.main_app = main_app
+        self.editing_link_entry = None
         self.setup_ui()
         
         # Hẹn giờ 100ms nạp dữ liệu ngay khi vừa bật phần mềm
@@ -42,19 +43,23 @@ class ManagerTab:
         table_frame = tk.Frame(self.parent, bg="#ffffff", bd=1, relief="solid")
         table_frame.pack(fill="both", expand=True, padx=20, pady=5)
 
-        cols = ("Date", "Project", "Voice", "Path", "Status")
+        cols = ("Date", "Project", "Voice", "Path", "TikTokLink", "Post", "Status")
         self.tree = ttk.Treeview(table_frame, columns=cols, show="headings", selectmode="extended")
         
         self.tree.heading("Date", text="Ngày Tạo")
         self.tree.heading("Project", text="Tên Project")
         self.tree.heading("Voice", text="File Voice")
         self.tree.heading("Path", text="Đường Dẫn")
+        self.tree.heading("TikTokLink", text="Link SP TikTok")
+        self.tree.heading("Post", text="Đăng")
         self.tree.heading("Status", text="Trạng Thái")
 
         self.tree.column("Date", width=140, anchor="center")
         self.tree.column("Project", width=250, anchor="w")
         self.tree.column("Voice", width=200, anchor="w")
         self.tree.column("Path", width=350, anchor="w")
+        self.tree.column("TikTokLink", width=260, anchor="w")
+        self.tree.column("Post", width=80, anchor="center")
         self.tree.column("Status", width=130, anchor="center")
 
         # THIẾT LẬP MÀU TRẠNG THÁI
@@ -62,13 +67,17 @@ class ManagerTab:
         self.tree.tag_configure("pending", foreground="#000000", font=("Arial", 11))         
 
         scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=scrollbar.set)
+        x_scrollbar = ttk.Scrollbar(table_frame, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=scrollbar.set, xscrollcommand=x_scrollbar.set)
         
         self.tree.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
+        x_scrollbar.pack(side="bottom", fill="x")
 
         # KÉO CHUỘT ĐỂ BÔI ĐEN
         self.tree.bind("<B1-Motion>", self.drag_to_select)
+        self.tree.bind("<Double-1>", self.on_tree_double_click)
+        self.tree.bind("<ButtonRelease-1>", self.on_tree_click)
 
         # MENU CHUỘT PHẢI
         self.context_menu = tk.Menu(self.parent, tearoff=0, font=("Arial", 11))
@@ -179,11 +188,120 @@ class ManagerTab:
                 project_name = r['project_name']
                 voice_name = r['voice_name']
                 file_path = r['file_path']
+                tiktok_link = r['tiktok_link'] or ""
                 status = r['status'] or "Chưa chuyển"
                 tag = "done" if status == "Đã chuyển" else "pending"
-                self.tree.insert("", "end", values=(created_at, project_name, voice_name, file_path, status), tags=(tag,))
+                self.tree.insert("", "end", values=(created_at, project_name, voice_name, file_path, tiktok_link, "Đăng", status), tags=(tag,))
         except Exception as e:
             print("Lỗi load bảng từ DB:", e)
+
+    def on_tree_double_click(self, event):
+        item = self.tree.identify_row(event.y)
+        column = self.tree.identify_column(event.x)
+        if not item or column != "#5":
+            return
+        self.edit_tiktok_link_cell(item)
+
+    def on_tree_click(self, event):
+        item = self.tree.identify_row(event.y)
+        column = self.tree.identify_column(event.x)
+        if item and column == "#6":
+            self.post_video_from_row(item)
+
+    def edit_tiktok_link_cell(self, item):
+        if self.editing_link_entry is not None:
+            self.editing_link_entry.destroy()
+            self.editing_link_entry = None
+
+        bbox = self.tree.bbox(item, "TikTokLink")
+        if not bbox:
+            return
+        x, y, width, height = bbox
+        values = list(self.tree.item(item)["values"])
+        current_value = values[4] if len(values) > 4 else ""
+
+        entry = tk.Entry(self.tree, font=("Arial", 11))
+        entry.insert(0, current_value)
+        entry.place(x=x, y=y, width=width, height=height)
+        entry.focus_set()
+        entry.select_range(0, tk.END)
+        self.editing_link_entry = entry
+
+        def save_and_close(event=None):
+            if self.editing_link_entry is None:
+                return
+            new_link = normalize_tiktok_product_link(entry.get())
+            values[4] = new_link
+            self.tree.item(item, values=values)
+            try:
+                import database
+                database.update_rendered_video_tiktok_link(values[3], new_link)
+                if new_link:
+                    upsert_manual_tiktok_job(
+                        values[3],
+                        values[1],
+                        new_link,
+                        profile_name=self.main_app.get_active_profile_name(),
+                    )
+                if hasattr(self.main_app, "tab13"):
+                    self.main_app.tab13.refresh_jobs_preview()
+            except Exception as exc:
+                messagebox.showwarning("Chưa lưu được link", str(exc))
+            entry.destroy()
+            self.editing_link_entry = None
+
+        entry.bind("<Return>", save_and_close)
+        entry.bind("<FocusOut>", save_and_close)
+        entry.bind("<Escape>", lambda event: (entry.destroy(), setattr(self, "editing_link_entry", None)))
+
+    def post_video_from_row(self, item):
+        values = list(self.tree.item(item)["values"])
+        if len(values) < 7:
+            return
+
+        project_name = str(values[1] or "").strip()
+        video_path = str(values[3] or "").strip()
+        tiktok_link = normalize_tiktok_product_link(values[4])
+        if not os.path.exists(video_path):
+            messagebox.showwarning("Mất file", "Không thấy file video để đăng.")
+            return
+        if not tiktok_link:
+            messagebox.showwarning("Thiếu link", "Bác nhập link sản phẩm TikTok ở cột Link SP TikTok trước đã.")
+            self.edit_tiktok_link_cell(item)
+            return
+        if not hasattr(self.main_app, "tab13"):
+            messagebox.showwarning("Thiếu tab 13", "Không tìm thấy tab 13 để chạy luồng đăng web.")
+            return
+
+        job = upsert_manual_tiktok_job(
+            video_path,
+            project_name,
+            tiktok_link,
+            profile_name=self.main_app.get_active_profile_name(),
+        )
+        if not job:
+            messagebox.showwarning("Chưa tạo được job", "Không tạo được job đăng. Kiểm tra video thuộc project/tài khoản hiện tại chưa.")
+            return
+
+        values[6] = "Đang đăng WEB"
+        self.tree.item(item, values=values)
+
+        def on_done(ok, msg):
+            self.load_excel_data()
+            if ok:
+                messagebox.showinfo("Đăng xong", "Đã đăng video bằng luồng tab 13.")
+            else:
+                messagebox.showwarning("Đăng lỗi", str(msg)[:300])
+
+        started = self.main_app.tab13.post_single_video_from_manager(
+            video_path,
+            job["video_name"],
+            job["caption"],
+            job["tiktok_link"],
+            on_done=on_done,
+        )
+        if started and hasattr(self.main_app, "tab13"):
+            self.main_app.tab13.refresh_jobs_preview()
             
     def open_video(self):
         selected = self.tree.selection()
@@ -370,9 +488,6 @@ class ManagerTab:
             else:
                 failed_items.append((path, err))
 
-        if deletable_db_paths:
-            database.delete_rendered_videos(deletable_db_paths)
-
         try:
             success_names = [os.path.basename(p) for p in deletable_db_paths]
             if success_names:
@@ -383,6 +498,9 @@ class ManagerTab:
                 self.main_app.root.after(0, self.main_app.tab13.refresh_jobs_preview)
         except Exception as e:
             print(f"Không xóa được job Shopee tương ứng: {e}")
+
+        if deletable_db_paths:
+            database.delete_rendered_videos(deletable_db_paths)
 
         self.load_excel_data()
 
@@ -398,7 +516,8 @@ class ManagerTab:
 
     def _delete_video_file_with_fallback(self, raw_path):
         """Xóa file video theo nhiều đường dẫn dự phòng; trả về (thành công, lỗi)."""
-        from main import GLOBAL_OUT_DIR
+        from paths import get_export_dir
+        output_dir = get_export_dir(self.main_app.get_active_profile_name())
 
         raw_path = str(raw_path or "").strip()
         if not raw_path:
@@ -416,8 +535,8 @@ class ManagerTab:
         _add_candidate(normalized)
         _add_candidate(os.path.abspath(normalized))
         if base_name:
-            _add_candidate(os.path.join(GLOBAL_OUT_DIR, base_name))
-            for p in glob.glob(os.path.join(GLOBAL_OUT_DIR, "**", base_name), recursive=True):
+            _add_candidate(os.path.join(output_dir, base_name))
+            for p in glob.glob(os.path.join(output_dir, "**", base_name), recursive=True):
                 _add_candidate(p)
 
         existed_any = False
@@ -435,15 +554,17 @@ class ManagerTab:
         return True, ""
 
     def open_folder(self):
-        from main import GLOBAL_OUT_DIR
-        if os.path.exists(GLOBAL_OUT_DIR):
-            os.startfile(GLOBAL_OUT_DIR)
+        from paths import get_export_dir
+        output_dir = get_export_dir(self.main_app.get_active_profile_name())
+        if os.path.exists(output_dir):
+            os.startfile(output_dir)
 
     def open_excel(self):
         """Mở thư mục kho chứa video thành phẩm (CSV cũ đã thay bằng Database)"""
-        from main import GLOBAL_OUT_DIR
-        if os.path.exists(GLOBAL_OUT_DIR):
-            os.startfile(GLOBAL_OUT_DIR)
+        from paths import get_export_dir
+        output_dir = get_export_dir(self.main_app.get_active_profile_name())
+        if os.path.exists(output_dir):
+            os.startfile(output_dir)
 
     # ================= WEB SERVER LAN =================
 
@@ -485,8 +606,8 @@ class ManagerTab:
             self.httpd = None
             self.main_app.root.after(0, lambda: update_ui_and_notify(False, "🔌 Đã TẮT Trạm phát sóng Web Server!"))
         else:
-            from main import GLOBAL_OUT_DIR
-            abs_dir = os.path.abspath(GLOBAL_OUT_DIR)
+            from paths import get_export_dir
+            abs_dir = os.path.abspath(get_export_dir(self.main_app.get_active_profile_name()))
             os.makedirs(abs_dir, exist_ok=True)
             
             PORT = 8000

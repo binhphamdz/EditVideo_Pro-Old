@@ -10,6 +10,8 @@ import concurrent.futures
 import telebot
 from paths import DEFAULT_PROFILE, get_export_dir
 
+VOICE_FILE_EXTS = ('.mp3', '.wav', '.m4a', '.mp4', '.mov', '.mkv', '.avi', '.webm', '.m4v')
+
 class TelegramBotManager:
     def __init__(self, main_app):
         self.main_app = main_app
@@ -17,6 +19,42 @@ class TelegramBotManager:
         self.bot_is_running = False
         self.bot_sessions = {}
         self.session_lock = threading.Lock()  # 🔒 Thread-safety cho sessions
+        self.render_batch_lock = threading.Lock()
+        self.render_status_lock = threading.Lock()
+        self.current_render_batch = None
+        self.waiting_render_batches = []
+        self.notify_chat_ids = set(self.main_app.config.get("telegram_notify_chat_ids", []))
+
+    def register_notify_chat(self, chat_id):
+        try:
+            chat_id = int(chat_id)
+        except Exception:
+            return
+        self.notify_chat_ids.add(chat_id)
+        try:
+            self.main_app.config["telegram_notify_chat_ids"] = sorted(self.notify_chat_ids)
+            self.main_app.save_config()
+        except Exception:
+            pass
+
+    def notify_web_post_done(self, video_name, caption="", product_link="", attached=False):
+        if not self.bot or not self.notify_chat_ids:
+            return
+        link_status = "có gắn giỏ" if attached else "không gắn giỏ"
+        text = (
+            "✅ Đã đăng xong video TikTok\n"
+            f"🎬 {video_name}\n"
+            f"🛒 {link_status}"
+        )
+        if caption:
+            text += f"\n📝 {str(caption)[:120]}"
+        if product_link and attached:
+            text += f"\n🔗 {product_link}"
+        for chat_id in list(self.notify_chat_ids):
+            try:
+                self.bot.send_message(chat_id, text)
+            except Exception as exc:
+                print(f"⚠️ Không gửi được thông báo Telegram post_done tới {chat_id}: {exc}")
 
     def get_active_profile_name(self):
         try:
@@ -38,6 +76,11 @@ class TelegramBotManager:
         if not target_profile:
             if self.bot:
                 self.bot.send_message(chat_id, "❌ Bác chưa chọn tài khoản đích.")
+            return
+
+        if self.render_batch_lock.locked():
+            if self.bot:
+                self.bot.send_message(chat_id, "⛔ Đang render batch, tạm khóa đổi tài khoản để tránh lệch thư mục xuất video. Xong render rồi đổi tiếp nhé sếp.")
             return
 
         def do_switch():
@@ -121,16 +164,26 @@ class TelegramBotManager:
         import database
         usage = {}
         try:
-            conn = database.get_connection()
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT p.name as project_name, v.file_name, v.usage_count
-                FROM voices v JOIN projects p ON v.project_id = p.id
-            """)
-            for row in cursor.fetchall():
-                key = f"{row['project_name']}_{row['file_name']}"
-                usage[key] = row['usage_count']
-            conn.close()
+            with database.db_lock:
+                conn = database.get_connection()
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT
+                        p.name as project_name,
+                        v.file_name,
+                        v.usage_count,
+                        CASE
+                            WHEN v.last_used IS NOT NULL
+                            AND v.last_used > datetime('now', '-1 days', 'localtime')
+                            THEN 1 ELSE 0
+                        END as recently_used
+                    FROM voices v JOIN projects p ON v.project_id = p.id
+                """)
+                for row in cursor.fetchall():
+                    key = f"{row['project_name']}_{row['file_name']}"
+                    recent_penalty = 1000000 if int(row['recently_used'] or 0) else 0
+                    usage[key] = int(row['usage_count'] or 0) + recent_penalty
+                conn.close()
         except: pass
         return usage
 
@@ -163,6 +216,232 @@ class TelegramBotManager:
             voice_usage_db[key] = voice_usage_db.get(key, 0) + 1
 
         return picked
+
+    def reserve_render_queue_voices(self, render_queue):
+        """Giữ chỗ voice ngay khi gom queue để batch chờ sau không bốc trùng."""
+        if not render_queue:
+            return
+        try:
+            import database
+            with database.db_lock:
+                conn = database.get_connection()
+                cursor = conn.cursor()
+                for voice_name, _proj_dir, proj_name in render_queue:
+                    project_id = database.get_or_create_project(proj_name)
+                    cursor.execute(
+                        """
+                        UPDATE voices
+                        SET last_used = datetime('now', 'localtime')
+                        WHERE project_id = ? AND file_name = ?
+                        """,
+                        (project_id, voice_name),
+                    )
+                conn.commit()
+                conn.close()
+        except Exception as exc:
+            print(f"⚠️ Không giữ chỗ voice bot được: {exc}")
+
+    def create_render_jobs_for_queue(self, batch_id, chat_id, render_queue, label):
+        try:
+            import database
+            return database.create_render_jobs(batch_id, self.get_active_profile_name(), chat_id, label, render_queue)
+        except Exception as exc:
+            print(f"⚠️ Không tạo render_jobs được: {exc}")
+            self.reserve_render_queue_voices(render_queue)
+            return [None] * len(render_queue)
+
+    def _get_safe_render_threads(self):
+        try:
+            return max(1, int(self.main_app.config.get("threads", 2)))
+        except (TypeError, ValueError):
+            return 2
+
+    def _build_bot_render_config(self):
+        config = dict(self.main_app.config)
+        profile_name = self.get_active_profile_name()
+        profile_cover = config.get("profile_enable_cover", {})
+        if isinstance(profile_cover, dict) and profile_name in profile_cover:
+            config["enable_cover"] = bool(profile_cover[profile_name])
+        else:
+            config["enable_cover"] = bool(config.get("enable_cover", True))
+        return config
+
+    def _ask_schedule_then_start_render(self, chat_id, render_queue, done_label, cleanup=None):
+        if not render_queue:
+            self.bot.send_message(chat_id, "❌ Không có video nào trong hàng chờ render.")
+            if cleanup:
+                cleanup()
+            return
+
+        sent_msg = self.bot.send_message(
+            chat_id,
+            "⏰ Render xong có tự chia lịch đăng TikTok không?\n"
+            "Trả lời: co / khong\n"
+            "Nếu chọn co, em sẽ lấy giờ hiện tại, chia các mốc tăng dần và mỗi mốc đăng 1 video để tránh dồn bài."
+        )
+
+        def process_schedule_choice(message):
+            text = (message.text or "").strip().lower()
+            auto_schedule = text in ("co", "có", "yes", "y", "ok", "oke", "1")
+            if cleanup:
+                cleanup()
+            if auto_schedule:
+                self.bot.send_message(chat_id, "✅ Đã chọn tự chia lịch sau render.")
+            else:
+                self.bot.send_message(chat_id, "✅ Không đặt lịch sau render, chỉ render video.")
+            threading.Thread(target=self._run_bot_render_queue, args=(chat_id, render_queue, done_label, auto_schedule), daemon=True).start()
+
+        self.bot.register_next_step_handler(sent_msg, process_schedule_choice)
+
+    def _run_bot_render_queue(self, chat_id, render_queue, done_label, auto_schedule=False):
+        if not render_queue:
+            self.bot.send_message(chat_id, "❌ Không có video nào trong hàng chờ render.")
+            return
+
+        batch_id = f"{int(time.time())}_{random.randint(1000, 9999)}"
+        batch_info = {
+            "id": batch_id,
+            "label": done_label,
+            "total": len(render_queue),
+            "completed": 0,
+            "chat_id": chat_id,
+            "queued_at": time.time(),
+            "started_at": None,
+        }
+
+        if self.render_batch_lock.locked():
+            with self.render_status_lock:
+                self.waiting_render_batches.append(batch_info)
+            self.bot.send_message(chat_id, "⏳ Máy đang render batch khác. Em đã đưa lệnh này vào hàng chờ, xong batch trước sẽ chạy tiếp.")
+
+        with self.render_batch_lock:
+            try:
+                job_ids = self.create_render_jobs_for_queue(batch_id, chat_id, render_queue, done_label)
+                with self.render_status_lock:
+                    self.waiting_render_batches = [b for b in self.waiting_render_batches if b.get("id") != batch_id]
+                    batch_info["started_at"] = time.time()
+                    self.current_render_batch = batch_info
+
+                completed = 0
+                batch_config = self._build_bot_render_config()
+                max_workers = self._get_safe_render_threads()
+                self.main_app.tab2.completed_count = 0
+                with self.main_app.tab2.opening_lock:
+                    self.main_app.tab2.used_opening_videos.clear()
+                with self.main_app.tab2.broll_lock:
+                    self.main_app.tab2.used_broll_videos.clear()
+
+                self.bot.send_message(chat_id, f"🧵 Bắt đầu render {len(render_queue)} video với {max_workers} luồng ổn định.")
+                with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    futures = {}
+                    for job_id, (voice_name, proj_dir, proj_name) in zip(job_ids, render_queue):
+                        future = executor.submit(self._render_one_with_retry, voice_name, proj_dir, proj_name, batch_config, job_id)
+                        futures[future] = (job_id, voice_name)
+                        time.sleep(1.5)
+
+                    for future in concurrent.futures.as_completed(futures):
+                        job_id, voice_name = futures[future]
+                        try:
+                            result = future.result()
+                            if result:
+                                completed += 1
+                                if job_id:
+                                    import database
+                                    database.update_render_job(job_id, "done")
+                            elif job_id:
+                                import database
+                                database.update_render_job(job_id, "failed", error=f"Render trả về False: {voice_name}")
+                        except Exception as exc:
+                            if job_id:
+                                try:
+                                    import database
+                                    database.update_render_job(job_id, "failed", error=exc)
+                                except Exception:
+                                    pass
+                            print(f"⚠️ Lỗi render bot: {exc}")
+                        with self.render_status_lock:
+                            if self.current_render_batch and self.current_render_batch.get("id") == batch_id:
+                                self.current_render_batch["completed"] = completed
+
+                self.bot.send_message(chat_id, f"🎉 DẠ XONG! {done_label} đã xuất xưởng {completed}/{len(render_queue)} video.\nSếp gõ /icloud để nhận hàng nhé!")
+                if completed > 0 and auto_schedule and hasattr(self.main_app, "tab13"):
+                    try:
+                        self.main_app.root.after(0, lambda: self.main_app.tab13.create_incremental_schedule_after_render("bot"))
+                        self.bot.send_message(chat_id, "⏰ Render xong em đã chia lịch đăng tăng dần cho toàn bộ video đang chờ ở tab 13.")
+                    except Exception as e:
+                        print(f"⚠️ Không tự lên lịch tab 13 sau render bot được: {e}")
+                try:
+                    self.main_app.tab4.load_excel_data()
+                except Exception as e:
+                    print(f"⚠️ Lỗi load_excel_data: {e}")
+            finally:
+                with self.render_status_lock:
+                    if self.current_render_batch and self.current_render_batch.get("id") == batch_id:
+                        self.current_render_batch = None
+
+    def get_render_status_text(self):
+        try:
+            import database
+            recent_jobs = database.list_recent_render_jobs(12, self.get_active_profile_name())
+        except Exception:
+            recent_jobs = []
+
+        with self.render_status_lock:
+            current = dict(self.current_render_batch) if self.current_render_batch else None
+            waiting = [dict(item) for item in self.waiting_render_batches]
+
+        if not current and not waiting:
+            return "✅ Hiện không có batch render nào đang chạy hoặc đang chờ."
+
+        lines = ["📊 TRẠNG THÁI RENDER BOT"]
+        now = time.time()
+        if current:
+            elapsed_min = int((now - (current.get("started_at") or now)) / 60)
+            lines.append(f"Đang chạy: {current.get('label')} - {current.get('completed', 0)}/{current.get('total', 0)} video - {elapsed_min} phút")
+        else:
+            lines.append("Đang chạy: không có")
+
+        if waiting:
+            lines.append(f"Đang chờ: {len(waiting)} batch")
+            for idx, item in enumerate(waiting[:5], 1):
+                wait_min = int((now - (item.get("queued_at") or now)) / 60)
+                lines.append(f"{idx}. {item.get('label')} - {item.get('total', 0)} video - chờ {wait_min} phút")
+        else:
+            lines.append("Đang chờ: 0 batch")
+
+        if recent_jobs:
+            lines.append("Job gần nhất:")
+            icon_map = {"queued": "⏳", "running": "🧵", "done": "✅", "failed": "❌", "cancelled": "🚫"}
+            for job in recent_jobs[:8]:
+                icon = icon_map.get(job["status"], "•")
+                lines.append(f"{icon} #{job['id']} {job['project_name']} | {job['voice_name']} | {job['status']}")
+
+        return "\n".join(lines)
+
+    def _render_one_with_retry(self, voice_name, proj_dir, proj_name, batch_config, job_id=None, max_attempts=2):
+        last_error = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                if job_id:
+                    import database
+                    database.update_render_job(job_id, "running")
+                result = self.main_app.tab2._process_single(voice_name, proj_dir, proj_name, batch_config)
+                if result:
+                    return True
+                last_error = "Render trả về False"
+            except Exception as exc:
+                last_error = exc
+
+            if attempt < max_attempts:
+                try:
+                    self.main_app.tab2.add_log(f"[{voice_name}] 🔁 Render lỗi, thử lại lần {attempt + 1}/{max_attempts}...")
+                except Exception:
+                    pass
+                time.sleep(3)
+
+        if last_error:
+            raise Exception(last_error)
+        return False
     
 
     def start_telegram_bot(self):
@@ -183,6 +462,7 @@ class TelegramBotManager:
         # =======================================================
         @self.bot.message_handler(commands=['help', 'start'])
         def send_help_menu(message):
+            self.register_notify_chat(message.chat.id)
             current_profile = self.get_active_profile_name()
             help_text = (
                 "🤖 *TRỢ LÝ ĐẠO DIỄN AI KÍNH CHÀO SẾP!* 🎬\n\n"
@@ -195,6 +475,7 @@ class TelegramBotManager:
                 "📚 /multimenu - Chọn NHIỀU dự án cùng lúc để bốc Voice tự động.\n"
                 "🎲 /autobatch - Bốc random TẤT CẢ dự án mỗi nơi vài Voice.\n"
                 "📦 /files - Vào kho xem video & trạng thái.\n"
+                "🌐 /dang [số lượng] - Chạy Tab 13 đăng TikTok/Web.\n"
                 "☁️ /icloud - Đồng bộ toàn bộ hàng mới sang iCloud.\n"
                 "🧹 /clean - Dọn dẹp video cũ trên iCloud.\n"
                 "🌐 /web - Bật/Tắt Trạm phát sóng LAN để tải video.\n"
@@ -207,6 +488,7 @@ class TelegramBotManager:
         # =======================================================
         @self.bot.message_handler(commands=['projects', 'toggle'])
         def list_and_toggle_projects(message):
+            self.register_notify_chat(message.chat.id)
             if not self.main_app.projects:
                 return self.bot.send_message(message.chat.id, "❌ Kho chưa có Project nào!")
 
@@ -223,6 +505,7 @@ class TelegramBotManager:
 
         @self.bot.message_handler(commands=['account', 'accounts', 'profile', 'taikhoan'])
         def handle_account_switch(message):
+            self.register_notify_chat(message.chat.id)
             chat_id = message.chat.id
             profiles = self.get_available_profiles()
             current_profile = self.get_active_profile_name()
@@ -291,6 +574,7 @@ class TelegramBotManager:
 
         @self.bot.message_handler(commands=['web', 'server'])
         def handle_web_server(message):
+            self.register_notify_chat(message.chat.id)
             chat_id = message.chat.id
             is_currently_on = hasattr(self.main_app.tab4, 'httpd') and self.main_app.tab4.httpd is not None
             
@@ -333,6 +617,43 @@ class TelegramBotManager:
         # =======================================================
         # CÁC LỆNH KHÁC CỦA SẾP
         # =======================================================
+        @self.bot.message_handler(commands=['renderstatus', 'queue', 'statusrender'])
+        def handle_render_status(message):
+            self.register_notify_chat(message.chat.id)
+            self.bot.send_message(message.chat.id, self.get_render_status_text())
+
+        @self.bot.message_handler(commands=['dang', 'post', 'autopost', 'webpost'])
+        def handle_web_post(message):
+            self.register_notify_chat(message.chat.id)
+            chat_id = message.chat.id
+            parts = (message.text or "").split()
+            count = 1
+            if len(parts) >= 2:
+                try:
+                    count = max(1, min(100, int(parts[1])))
+                except Exception:
+                    return self.bot.send_message(chat_id, "❌ Cú pháp: /dang hoặc /dang 5")
+
+            if not hasattr(self.main_app, "tab13"):
+                return self.bot.send_message(chat_id, "❌ Tool chưa có Tab 13 để đăng web.")
+            if self.main_app.tab13.is_running:
+                return self.bot.send_message(chat_id, "⏳ Tab 13 đang chạy job khác, sếp chờ xong rồi gọi lại nhé.")
+
+            self.bot.send_message(chat_id, f"🌐 Đã nhận lệnh đăng {count} video bằng Tab 13. Xong video nào em báo video đó.")
+            self.main_app.root.after(0, lambda c=count: self.main_app.tab13.start_scheduled_post(c))
+
+        @self.bot.message_handler(commands=['cancelqueue', 'huyqueue'])
+        def handle_cancel_queue(message):
+            with self.render_status_lock:
+                waiting_count = len(self.waiting_render_batches)
+                self.waiting_render_batches.clear()
+            try:
+                import database
+                db_count = database.cancel_queued_render_jobs(self.get_active_profile_name())
+            except Exception:
+                db_count = 0
+            self.bot.send_message(message.chat.id, f"🚫 Đã hủy {waiting_count} batch chờ trong bộ nhớ và {db_count} job queued trong DB. Batch đang chạy vẫn để chạy xong cho an toàn.")
+
         @self.bot.message_handler(commands=['files', 'kho'])
         def handle_view_files(message):
             chat_id = message.chat.id
@@ -439,38 +760,16 @@ class TelegramBotManager:
                 vdir = os.path.join(pdir, "Voices")
                 
                 if os.path.exists(vdir):
-                    voices = [f for f in os.listdir(vdir) if f.lower().endswith(('.mp3', '.wav'))]
+                    voices = [f for f in os.listdir(vdir) if f.lower().endswith(VOICE_FILE_EXTS)]
                     if voices:
                         num_to_pick = min(2, len(voices))
                         for chosen_voice in self.pick_least_used_voices(pname, voices, voice_usage_db, num_to_pick):
                             render_queue.append((chosen_voice, pdir, pname))
 
             if not render_queue: return self.bot.send_message(chat_id, "❌ Kho voice nhà mình trống trơn chưa có file nào sếp ơi!")
-            
             self.bot.send_message(chat_id, f"🚀 ĐÃ GOM ĐƯỢC {len(render_queue)} BÀI (Ưu tiên Voice mới/Random)!\nEm tống hết vào máy nổ luồng luôn nha sếp. 🏃‍♀️💨")
 
-            def process_mixed_queue():
-                completed = 0
-                with concurrent.futures.ThreadPoolExecutor(max_workers=self.main_app.config.get("threads", 2)) as executor:
-                    futures = []
-                    for item in render_queue:
-                        futures.append(executor.submit(self.main_app.tab2._process_single, item[0], item[1], item[2]))
-                        # THUẬT TOÁN CHỐNG KẸT: Đợi 1.5s trước khi nổ luồng tiếp theo
-                        time.sleep(1.5)
-                        
-                    for future in concurrent.futures.as_completed(futures):
-                        try:
-                            if future.result():
-                                completed += 1
-                        except:
-                            pass
-                self.bot.send_message(chat_id, f"🎉 DẠ XONG! Chuyến xe Random đã xuất xưởng {completed}/{len(render_queue)} video.\nSếp gõ /icloud để nhận hàng nhé!")
-                try:
-                    self.main_app.tab4.load_excel_data()
-                except Exception as e:
-                    print(f"⚠️ Lỗi load_excel_data: {e}")
-                
-            threading.Thread(target=process_mixed_queue, daemon=True).start()
+            self._ask_schedule_then_start_render(chat_id, render_queue, "Chuyến xe Random")
 
         @self.bot.message_handler(commands=['multimenu', 'chonnhieu'])
         def handle_multi_menu(message):
@@ -521,7 +820,7 @@ class TelegramBotManager:
                 pdir = self.main_app.get_proj_dir(pid, profile_name)
                 vdir = os.path.join(pdir, "Voices")
                 if os.path.exists(vdir):
-                    voices = [f for f in os.listdir(vdir) if f.lower().endswith(('.mp3', '.wav'))]
+                    voices = [f for f in os.listdir(vdir) if f.lower().endswith(VOICE_FILE_EXTS)]
                     if voices:
                         num_to_pick = min(random.randint(2, 3), len(voices))
                         picked_count = 0
@@ -541,29 +840,9 @@ class TelegramBotManager:
 
             self.bot.send_message(chat_id, msg_log + f"\n🚀 **TỔNG CỘNG ĐÃ GOM {len(render_queue)} BÀI!**\nEm tống hết vào máy nổ luồng luôn nha sếp! 🏃‍♀️💨", parse_mode="Markdown")
 
-            def process_mixed_queue():
-                completed = 0
-                with concurrent.futures.ThreadPoolExecutor(max_workers=self.main_app.config.get("threads", 2)) as executor:
-                    futures = []
-                    for item in render_queue:
-                        futures.append(executor.submit(self.main_app.tab2._process_single, item[0], item[1], item[2]))
-                        # THUẬT TOÁN CHỐNG KẸT: Đợi 1.5s trước khi nổ luồng tiếp theo
-                        time.sleep(1.5)
-                        
-                    for future in concurrent.futures.as_completed(futures):
-                        try:
-                            if future.result():
-                                completed += 1
-                        except:
-                            pass
-                
-                self.bot.send_message(chat_id, f"🎉 DẠ XONG! Chuyến xe Multi-Project đã xuất xưởng {completed}/{len(render_queue)} video.\nSếp gõ /icloud để nhận hàng nhé!")
-                try:
-                    self.main_app.tab4.load_excel_data()
-                except Exception as e:
-                    print(f"⚠️ Lỗi load_excel_data: {e}")
-
-            threading.Thread(target=process_mixed_queue, daemon=True).start()
+            with self.session_lock:
+                self.bot_sessions.pop(chat_id, None)
+            self._ask_schedule_then_start_render(chat_id, render_queue, "Chuyến xe Multi-Project")
             
         # --- BẮT TỪ KHÓA ---
         @self.bot.message_handler(func=lambda message: not message.text.startswith('/') and any(kw in message.text.lower() for kw in ['dọn dẹp', 'xóa rác']))
@@ -653,7 +932,7 @@ class TelegramBotManager:
             
             profile_name = sess.get('profile_name', self.get_active_profile_name())
             pdir = self.main_app.get_proj_dir(pid, profile_name); vdir = os.path.join(pdir, "Voices")
-            voices = [f for f in os.listdir(vdir) if f.lower().endswith(('.mp3', '.wav'))] if os.path.exists(vdir) else []
+            voices = [f for f in os.listdir(vdir) if f.lower().endswith(VOICE_FILE_EXTS)] if os.path.exists(vdir) else []
             if not voices: return self.bot.send_message(chat_id, f"Không có voice nào trong {proj_name}!")
             
             with self.session_lock:
@@ -687,32 +966,17 @@ class TelegramBotManager:
             self.bot.send_message(chat_id, f"🚀 Bắt đầu xào nấu {len(selected)} video!")
             
             # --- CẬP NHẬT: ĐA LUỒNG CÓ THẢ CỬA NGẮT QUÃNG 1.5 GIÂY ---
-            def run_menu_batch():
-                completed = 0
-                with concurrent.futures.ThreadPoolExecutor(max_workers=self.main_app.config.get("threads", 2)) as executor:
-                    futures = []
-                    for v in selected:
-                        futures.append(executor.submit(self.main_app.tab2._process_single, v, sess['proj_dir'], sess['proj_name']))
-                        time.sleep(1.5) # Cứu tinh chống kẹt file
-                    
-                    for future in concurrent.futures.as_completed(futures):
-                        try:
-                            if future.result():
-                                completed += 1
-                        except:
-                            pass
-                        
-                self.bot.send_message(chat_id, f"🎉 DẠ XONG đơn của sếp ({completed}/{len(selected)} video)!")
-                try:
-                    self.main_app.tab4.load_excel_data()
-                except Exception as e:
-                    print(f"⚠️ Lỗi load_excel_data: {e}")
-                finally:
-                    # 🧹 Cleanup session
-                    with self.session_lock:
-                        self.bot_sessions.pop(chat_id, None)
-                
-            threading.Thread(target=run_menu_batch, daemon=True).start()
+            render_queue = [(v, sess['proj_dir'], sess['proj_name']) for v in selected]
+            def cleanup_menu_session():
+                with self.session_lock:
+                    self.bot_sessions.pop(chat_id, None)
+
+            self._ask_schedule_then_start_render(
+                chat_id,
+                render_queue,
+                "Đơn của sếp",
+                cleanup=cleanup_menu_session,
+            )
 
         @self.bot.message_handler(commands=['icloud', 'sync'])
         def handle_sync_icloud(message):

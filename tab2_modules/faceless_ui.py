@@ -17,6 +17,7 @@ class FacelessTab:
         self.parent = parent
         self.main_app = main_app
         self.completed_count = 0
+        self.completed_lock = threading.Lock()
         self.opening_lock = threading.Lock()
         self.used_opening_videos = set()
         self.broll_lock = threading.Lock()
@@ -128,6 +129,10 @@ class FacelessTab:
         self.ent_font.pack(side="left", padx=5)
         tk.Button(fr_row3, text="📂 Chọn Font", bg="#3498db", fg="white", font=("Arial", 8, "bold"), command=self.pick_font).pack(side="left")
 
+        self.use_cover = tk.BooleanVar(value=self._get_profile_cover_enabled())
+        self.chk_use_cover = tk.Checkbutton(fr_row3, text="Làm ảnh bìa cho tài khoản này", variable=self.use_cover, bg="#ffffff")
+        self.chk_use_cover.pack(side="left", padx=10)
+
         fr_row_srt = tk.Frame(top_frame, bg="#ffffff")
         fr_row_srt.pack(fill="x", pady=5)
         tk.Label(fr_row_srt, text="Bóc Băng Bằng:", bg="#ffffff", font=("Arial", 9, "bold"), fg="#8e44ad").pack(side="left")
@@ -188,6 +193,7 @@ class FacelessTab:
         self.use_sfx.trace_add("write", self._save_config_auto)
         self.ent_groq.bind("<KeyRelease>", self._save_config_auto)
         self.ent_font.bind("<KeyRelease>", self._save_config_auto)
+        self.use_cover.trace_add("write", self._save_config_auto)
         self.spin_threads.bind("<KeyRelease>", self._save_config_auto)
         self.spin_threads.bind("<FocusOut>", self._save_config_auto)
         self.boc_bang_mode.trace_add("write", self._save_config_auto)
@@ -205,6 +211,17 @@ class FacelessTab:
         self.btn_run_batch = tk.Button(bot_frame, text="🚀 BẤM RENDER (ĐA LUỒNG)", bg="#c0392b", fg="white", font=("Arial", 14, "bold"), pady=10, command=self.start_batch_process)
         self.btn_run_batch.pack(fill="x")
 
+    def _get_profile_cover_enabled(self):
+        profile_name = self.main_app.get_active_profile_name()
+        profile_settings = self.main_app.config.get("profile_enable_cover", {})
+        if isinstance(profile_settings, dict) and profile_name in profile_settings:
+            return bool(profile_settings[profile_name])
+        return bool(self.main_app.config.get("enable_cover", True))
+
+    def _sync_profile_settings(self):
+        if hasattr(self, "use_cover"):
+            self.use_cover.set(self._get_profile_cover_enabled())
+
     def _save_config_auto(self, *args):
         """[MỚI] Tự động lưu config khi bất kỳ setting nào thay đổi"""
         try:
@@ -218,6 +235,13 @@ class FacelessTab:
             self.main_app.config["font_path"] = self.ent_font.get().strip()
             self.main_app.config["boc_bang_mode"] = self.boc_bang_mode.get()
             self.main_app.config["enable_v0"] = self.use_v0.get()
+            profile_name = self.main_app.get_active_profile_name()
+            profile_settings = self.main_app.config.get("profile_enable_cover", {})
+            if not isinstance(profile_settings, dict):
+                profile_settings = {}
+            profile_settings[profile_name] = self.use_cover.get()
+            self.main_app.config["profile_enable_cover"] = profile_settings
+            self.main_app.config["enable_cover"] = self.use_cover.get()
             self.main_app.config["trans_duration"] = self.scale_trans_dur.get()  # [MỚI] Lưu tốc độ chuyển cảnh
             try:
                 self.main_app.config["threads"] = int(self.spin_threads.get())
@@ -259,6 +283,7 @@ class FacelessTab:
         self._save_config_auto()
 
     def update_combo_projects(self):
+        self._sync_profile_settings()
         proj_list = []
         self.pid_map = {}
         for pid, pdata in self.main_app.projects.items():
@@ -458,10 +483,15 @@ class FacelessTab:
 
     def _run_multithread_batch(self, voices, proj_dir, proj_name, bot=None, chat_id=None):
         self.completed_count = 0
-        num_threads = self.main_app.config.get("threads", 2)
+        batch_config = dict(self.main_app.config)
+        batch_config["enable_cover"] = self._get_profile_cover_enabled()
+        try:
+            num_threads = max(1, int(batch_config.get("threads", 2)))
+        except (TypeError, ValueError):
+            num_threads = 2
         with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
             # Truyền thêm tham số thời gian delay để chống kẹt
-            futures = [executor.submit(self._process_single, v, proj_dir, proj_name) for v in voices]
+            futures = [executor.submit(self._process_single, v, proj_dir, proj_name, batch_config) for v in voices]
             for future in concurrent.futures.as_completed(futures):
                 try: future.result()
                 except Exception as exc: self.add_log(f"❌ LUỒNG CRASH: {exc}")
@@ -480,20 +510,29 @@ class FacelessTab:
         try: self.main_app.tab4.load_excel_data()
         except: pass
 
-    def _process_single(self, voice_name, proj_dir, proj_name):
-        from main import GLOBAL_OUT_DIR
+        try:
+            if self.completed_count > 0 and hasattr(self.main_app, "tab13"):
+                self.main_app.root.after(0, lambda: self.main_app.tab13.schedule_all_pending_after_render("tab2"))
+        except Exception as e:
+            self.add_log(f"⚠️ Không tự lên lịch Tab 13 sau render được: {e}")
+
+    def _process_single(self, voice_name, proj_dir, proj_name, config=None):
         import database
-        from .video_engine import render_faceless_video, render_faceless_video_with_base, apply_video_speed_after_render
+        from paths import get_export_dir
+        from .video_engine import render_faceless_video, render_faceless_video_with_base, apply_video_speed_after_render, detect_freeze_score
         from .ai_services import get_transcription, get_director_timeline
         from datetime import datetime
         import os
+        config = config or self.main_app.config
         
         try:
             voice_path = os.path.join(proj_dir, "Voices", voice_name)
             voice_ext = os.path.splitext(voice_path)[1].lower()
             is_video_voice = voice_ext in (".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v")
+            output_dir = get_export_dir(self.main_app.get_active_profile_name())
+            os.makedirs(output_dir, exist_ok=True)
             # Tạo tên file đầu ra: [Tên Project] Tên Voice_GiờPhútGiây.mp4
-            out_file = os.path.join(GLOBAL_OUT_DIR, f"[{proj_name}] {os.path.splitext(voice_name)[0]}_{datetime.now().strftime('%H%M%S')}.mp4")
+            out_file = os.path.join(output_dir, f"[{proj_name}] {os.path.splitext(voice_name)[0]}_{datetime.now().strftime('%H%M%S')}.mp4")
             pid = self.pid_map.get(proj_name)
             
             # =======================================================
@@ -519,7 +558,7 @@ class FacelessTab:
                 self.add_log(f"[{voice_name}] ✅ Dùng SRT (cache hoặc extract mới)")
             except Exception as e:
                 self.add_log(f"[{voice_name}] ⚠️ Fallback extract: {str(e)[:50]}")
-                voice_text = get_transcription(voice_path, voice_name, self.main_app.config.get("boc_bang_mode", "groq"), self.main_app.config, self.add_log)
+                voice_text = get_transcription(voice_path, voice_name, config.get("boc_bang_mode", "groq"), config, self.add_log)
             
             # =======================================================
             # 3. LẤY KHO CẢNH TRÁM (BROLL) TỪ DATABASE
@@ -527,7 +566,7 @@ class FacelessTab:
             with database.db_lock:
                 conn = database.get_connection()
                 cursor = conn.cursor()
-                cursor.execute("SELECT file_name, duration, description, usage_count, keep_audio FROM brolls WHERE project_id = ? AND status = 'active'", (db_proj_id,))
+                cursor.execute("SELECT file_name, duration, description, usage_count, keep_audio, bad_count, freeze_score, scene_type FROM brolls WHERE project_id = ? AND status = 'active'", (db_proj_id,))
                 broll_rows = cursor.fetchall()
                 conn.close()
             
@@ -537,18 +576,23 @@ class FacelessTab:
             for r in broll_rows:
                 v = r['file_name']
                 # Tính độ dài thực tế sau khi áp dụng tốc độ video (config)
-                dur = round(r['duration'] / self.main_app.config.get('video_speed', 1.0), 1)
+                dur = round(r['duration'] / config.get('video_speed', 1.0), 1)
                 desc = r['description'] or ""
                 usage = r['usage_count']
+                scene_type = r['scene_type'] or ""
                 
                 broll_data[v] = {
                     'usage_count': usage, 
                     'keep_audio': bool(r['keep_audio']), 
                     'duration': r['duration'], 
-                    'description': desc
+                    'description': desc,
+                    'scene_type': scene_type,
+                    'bad_count': int(r['bad_count'] or 0),
+                    'freeze_score': float(r['freeze_score'] or 0),
                 }
                 broll_usage[v] = usage
-                broll_text += f"- File: '{v}' (Dài {dur}s) | Đã dùng: {usage} lần | Mô tả: {desc}\n"
+                type_text = f" | Loại cảnh: {scene_type}" if scene_type else ""
+                broll_text += f"- File: '{v}' (Dài {dur}s) | Đã dùng: {usage} lần{type_text} | Mô tả: {desc}\n"
 
             # =======================================================
             # 4. GỌI AI ĐẠO DIỄN (Lên kịch bản cắt ghép)
@@ -558,13 +602,14 @@ class FacelessTab:
             timeline = get_director_timeline(
                 voice_text,
                 broll_text,
-                self.main_app.config,
+                config,
                 self.add_log,
                 voice_name,
                 proj_context,
                 opening_state=opening_state,
                 global_broll_state=broll_state,
                 broll_usage=broll_usage,
+                is_video_voice=is_video_voice,
             )
             
             # =======================================================
@@ -576,15 +621,15 @@ class FacelessTab:
             if is_video_voice:
                 actual_used_brolls = render_faceless_video_with_base(
                     voice_name, voice_path, timeline, proj_dir, proj_name,
-                    self.main_app.config, out_file, GLOBAL_OUT_DIR, self.add_log, broll_data
+                    config, out_file, output_dir, self.add_log, broll_data
                 )
             else:
                 actual_used_brolls = render_faceless_video(
                     voice_name, voice_path, timeline, proj_dir, proj_name,
-                    self.main_app.config, out_file, GLOBAL_OUT_DIR, self.add_log, broll_data
+                    config, out_file, output_dir, self.add_log, broll_data
                 )
 
-            speed_val = self.main_app.config.get("video_speed", 1.0)
+            speed_val = config.get("video_speed", 1.0)
             out_file = apply_video_speed_after_render(out_file, speed_val, self.add_log)
             
             # Kiểm tra xem project có đang bật "Hết hàng" không để quyết định ghi job Shopee
@@ -592,11 +637,12 @@ class FacelessTab:
             if shopee_out_of_stock:
                 self.add_log(f"[{voice_name}] ⏭️ Shopee đang để Hết hàng, bỏ qua lưu Job đăng bài.")
             else:
-                exported_to_shopee, _ = export_rendered_video_to_shopee_files(proj_dir, out_file, config=self.main_app.config, default_status="Chưa đăng")
+                exported_to_shopee, _ = export_rendered_video_to_shopee_files(proj_dir, out_file, config=config, default_status="Chưa đăng")
                 if exported_to_shopee:
                     self.add_log(f"[{voice_name}] ✅ Đã lưu Job đăng Shopee vào Database.")
 
-            self.completed_count += 1
+            with self.completed_lock:
+                self.completed_count += 1
             self.add_log(f"✅ THÀNH CÔNG: Đã xuất xưởng {voice_name}!")
 
             # =======================================================
@@ -606,6 +652,19 @@ class FacelessTab:
                 database.log_rendered_video(proj_name, voice_name, out_file)
             except Exception as e:
                 self.add_log(f"⚠️ Không ghi được log video vào DB: {e}")
+
+            if actual_used_brolls and config.get("enable_freeze_detect", True):
+                for v_name in actual_used_brolls:
+                    try:
+                        if broll_data.get(v_name, {}).get("freeze_score", 0) > 0:
+                            continue
+                        v_path = os.path.join(proj_dir, "Broll", v_name)
+                        freeze_score = detect_freeze_score(v_path)
+                        if freeze_score >= 1.5:
+                            database.mark_broll_health(proj_name, v_name, freeze_score=freeze_score, error=f"Freeze {freeze_score:.1f}s")
+                            self.add_log(f"⚠️ Cảnh {v_name} có dấu hiệu đứng hình {freeze_score:.1f}s, đã giảm ưu tiên.")
+                    except Exception:
+                        pass
 
             # =======================================================
             # 7. CỘNG ĐIỂM SỬ DỤNG (UPDATE DATABASE SIÊU TỐC)

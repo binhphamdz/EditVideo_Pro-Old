@@ -439,7 +439,7 @@ def _extract_json_from_response(text):
     json_str = re.sub(r',\s*([\]}])', r'\1', json_str)
     return json.loads(json_str)
 
-def get_director_timeline(voice_text, broll_text, config, log_cb, voice_name, project_context="", provider=None, model=None, opening_state=None, broll_usage=None, global_broll_state=None):
+def get_director_timeline(voice_text, broll_text, config, log_cb, voice_name, project_context="", provider=None, model=None, opening_state=None, broll_usage=None, global_broll_state=None, is_video_voice=False):
     import time
     import requests
     import json
@@ -478,6 +478,26 @@ def get_director_timeline(voice_text, broll_text, config, log_cb, voice_name, pr
         blocked_openings = list(opening_state.get("used", []) or [])
     blocked_text = "\nDANH SACH CAM (canh mo dau da dung trong batch): " + ", ".join(blocked_openings) if blocked_openings else ""
 
+    scene_type_rules = """LUẬT DÙNG LOẠI CẢNH:
+- Nếu câu thoại giới thiệu hình dáng/sản phẩm/tên sản phẩm -> ưu tiên Loại cảnh: cận sản phẩm.
+- Nếu câu thoại mô tả thao tác, cách dùng, trải nghiệm, đang cầm/đổ/bôi/lắp/mở -> ưu tiên Loại cảnh: demo sử dụng.
+- Nếu câu thoại nói đóng gói, mở hộp, giao hàng, phụ kiện trong hộp -> ưu tiên Loại cảnh: đóng gói.
+- Nếu câu thoại nói chất liệu, bề mặt, độ mịn, vân, lớp phủ, cận chi tiết -> ưu tiên Loại cảnh: texture.
+- Nếu câu thoại nói kết quả, trước/sau, thay đổi, hiệu quả -> ưu tiên Loại cảnh: before-after.
+- Nếu còn lựa chọn khác đủ hợp, tránh cảnh Loại cảnh: không rõ hoặc mô tả quá mơ hồ.
+- Loại cảnh chỉ là tín hiệu ưu tiên; nếu mô tả cảnh khớp câu thoại hơn rõ ràng thì vẫn được chọn."""
+
+    if is_video_voice:
+        voice_mode_rules = """CHẾ ĐỘ VOICE LÀ VIDEO:
+- Voice đã có hình nền/base video, nên cảnh trám chỉ là điểm nhấn, không cần phủ kín toàn bộ câu thoại.
+- Ưu tiên chọn 1-2 cảnh thật khớp và rõ, thay vì cố nhồi nhiều cảnh cho đủ thời lượng.
+- Có thể để khoảng trống cho base video nếu ứng viên b-roll không thật sự khớp.
+- Với đoạn ít cần minh họa, chọn ít cảnh hơn để giữ tự nhiên."""
+    else:
+        voice_mode_rules = """CHẾ ĐỘ VOICE CHỈ LÀ ÂM THANH:
+- Cần chọn b-roll đủ phủ hình cho câu thoại.
+- Nếu một video ngắn hơn thời lượng thoại, ghép thêm video phù hợp từ rổ ứng viên."""
+
     def _chunk_timeline_items(items, min_size=5, max_size=8, overlap=1):
         chunks = []
         i = 0
@@ -514,11 +534,14 @@ Dưới đây là danh sách câu thoại + candidates cần chấm điểm:
 Thông tin kho video (mô tả):
 {chunk_broll_text}
 
+{scene_type_rules}
+
 YÊU CẦU:
 1. Chấm điểm relevance từng candidate theo thang 1-5.
-2. Sắp xếp candidates theo điểm giảm dần.
-3. Trả về JSON array, giữ nguyên start/end/text.
-4. Thêm key "scores" (mảng điểm) cùng thứ tự với candidates.
+2. Khi điểm tương đương, ưu tiên candidate có Loại cảnh khớp luật phía trên.
+3. Sắp xếp candidates theo điểm giảm dần.
+4. Trả về JSON array, giữ nguyên start/end/text.
+5. Thêm key "scores" (mảng điểm) cùng thứ tự với candidates.
 """
         try:
             raw_score = _call_ai_director(prompt_score, config, provider, model, temperature=0.1, log_cb=log_cb)
@@ -555,15 +578,21 @@ YÊU CẦU:
 Dưới đây là Kho video có kèm theo MÔ TẢ CHI TIẾT và [SỐ LẦN ĐÃ DÙNG] của từng cảnh:
 {broll_text}
 
+{scene_type_rules}
+
+{voice_mode_rules}
+
 Nội dung Voice (Giọng đọc):
 {chunk_voice_text}
 
 VÒNG 1 - TÌM KIẾM ỨNG VIÊN (THẮT CHẶT):
 1. Đọc kỹ từng câu thoại.
 2. Chọn ra TỪ 3 ĐẾN 5 VIDEO ỨNG VIÊN phù hợp nhất về mặt ngữ nghĩa VÀ BỐI CẢNH SẢN PHẨM cho câu thoại đó.
-3. Ưu tiên nhặt những video có "Đã dùng: 0 lần" hoặc số lần dùng thấp.
-4. Với câu mở đầu, TRÁNH các video nằm trong danh sách cấm nếu còn ứng viên khác.
-5. BẮT BUỘC trả về ĐÚNG CÚ PHÁP JSON (có dấu ngoặc kép ở các key):
+3. Ưu tiên ứng viên có Loại cảnh khớp luật phía trên; tránh Loại cảnh không rõ nếu còn cảnh khác hợp.
+4. Ưu tiên nhặt những video có "Đã dùng: 0 lần" hoặc số lần dùng thấp.
+5. Với câu mở đầu, TRÁNH các video nằm trong danh sách cấm nếu còn ứng viên khác.
+6. Nếu voice là video, chỉ cần ứng viên thật sự khớp, không cần ép quá nhiều cảnh.
+7. BẮT BUỘC trả về ĐÚNG CÚ PHÁP JSON (có dấu ngoặc kép ở các key):
 [ {{"start": 0.0, "end": 2.5, "text": "...", "candidates": ["vid1.mp4", "vid2.mp4"]}} ]"""
 
         raw_chunk = []
@@ -593,18 +622,22 @@ VÒNG 1 - TÌM KIẾM ỨNG VIÊN (THẮT CHẶT):
 Dưới đây là Kịch bản nháp (gồm start/end của câu thoại) và danh sách Video Ứng Viên:
 {candidates_json_str}
 
-Thông tin chi tiết (Độ dài giây, Mô tả, Số lần dùng) của toàn bộ kho:
+Thông tin chi tiết (Độ dài giây, Mô tả, Loại cảnh, Số lần dùng) của toàn bộ kho:
 {chunk_broll_text}
+
+{scene_type_rules}
+
+{voice_mode_rules}
 
 VÒNG 2 - CHỐT HẠ CHUỖI VIDEO (THẮT CHẶT):
 1. Tính Thời lượng câu thoại (end - start).
-2. Chọn video từ mảng 'candidates' ưu tiên Số lần dùng thấp nhất.
+2. Chọn video từ mảng 'candidates' ưu tiên Loại cảnh khớp, sau đó mới ưu tiên Số lần dùng thấp nhất.
 3. Với câu mở đầu, tránh video trong danh sách cấm nếu còn lựa chọn khác.
-4. CHIẾN LƯỢC NỐI CẢNH: 
-   - Nếu video ngắn hơn thời lượng thoại -> CHỌN THÊM video từ rổ ứng viên ghép vào.
-   - Tổng độ dài các video được chọn phải lớn hơn hoặc bằng thời lượng thoại.
+4. CHIẾN LƯỢC NỐI CẢNH:
+   - Nếu voice chỉ là âm thanh: nếu video ngắn hơn thời lượng thoại -> CHỌN THÊM video từ rổ ứng viên ghép vào; tổng độ dài nên lớn hơn hoặc bằng thời lượng thoại.
+   - Nếu voice là video: KHÔNG cần phủ kín câu thoại; chọn 1-2 video thật khớp là đủ, có thể để base video hiện ở phần còn lại.
    - TUYỆT ĐỐI KHÔNG chọn lặp lại 1 video 2 lần trong cùng 1 câu thoại.
-4. BẮT BUỘC trả về ĐÚNG CÚ PHÁP JSON (có dấu ngoặc kép ở các key):
+5. BẮT BUỘC trả về ĐÚNG CÚ PHÁP JSON (có dấu ngoặc kép ở các key):
 [ {{"start": 0.0, "end": 4.5, "text": "...", "video_files": ["vid_1.mp4", "vid_2.mp4"]}} ]"""
 
         final_chunk = []

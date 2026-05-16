@@ -63,6 +63,40 @@ def init_db():
     except Exception:
         pass
 
+    # [MIGRATION] Link sản phẩm TikTok dùng cho tab auto đăng web.
+    try:
+        cursor.execute("ALTER TABLE projects ADD COLUMN tiktok_link TEXT")
+        conn.commit()
+    except Exception:
+        pass
+
+    try:
+        cursor.execute("ALTER TABLE shopee_jobs ADD COLUMN tiktok_link TEXT")
+        conn.commit()
+    except Exception:
+        pass
+
+    try:
+        cursor.execute("ALTER TABLE rendered_videos ADD COLUMN tiktok_link TEXT")
+        conn.commit()
+    except Exception:
+        pass
+
+    for sql in [
+        "ALTER TABLE voices ADD COLUMN reserved_at TIMESTAMP",
+        "ALTER TABLE voices ADD COLUMN reserved_by_job TEXT",
+        "ALTER TABLE brolls ADD COLUMN bad_count INTEGER DEFAULT 0",
+        "ALTER TABLE brolls ADD COLUMN freeze_score REAL DEFAULT 0",
+        "ALTER TABLE brolls ADD COLUMN last_error TEXT",
+        "ALTER TABLE brolls ADD COLUMN scene_type TEXT",
+        "ALTER TABLE brolls ADD COLUMN ai_recognition_log TEXT",
+    ]:
+        try:
+            cursor.execute(sql)
+            conn.commit()
+        except Exception:
+            pass
+
     # 1. Bảng Projects (Bổ sung context, ảnh mẫu, links)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS projects (
@@ -73,6 +107,7 @@ def init_db():
             ref_img_1 TEXT,
             ref_img_2 TEXT,
             product_links TEXT,
+            tiktok_link TEXT,
             shopee_out_of_stock INTEGER DEFAULT 0,
             status TEXT DEFAULT 'active',
             timeline_json TEXT DEFAULT '[]',
@@ -116,10 +151,35 @@ def init_db():
             duration REAL DEFAULT 0,
             description TEXT,
             usage_count INTEGER DEFAULT 0,
+            bad_count INTEGER DEFAULT 0,
+            freeze_score REAL DEFAULT 0,
+            last_error TEXT,
+            scene_type TEXT,
+            ai_recognition_log TEXT,
             keep_audio INTEGER DEFAULT 0,
             status TEXT DEFAULT 'active', 
             FOREIGN KEY (project_id) REFERENCES projects (id) ON DELETE CASCADE,
             UNIQUE(project_id, file_name)
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS render_jobs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            batch_id TEXT NOT NULL,
+            profile_name TEXT,
+            chat_id TEXT,
+            label TEXT,
+            project_name TEXT NOT NULL,
+            voice_name TEXT NOT NULL,
+            proj_dir TEXT,
+            status TEXT DEFAULT 'queued',
+            output_path TEXT,
+            error TEXT,
+            attempts INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            started_at TIMESTAMP,
+            finished_at TIMESTAMP
         )
     ''')
 
@@ -131,6 +191,7 @@ def init_db():
             video_name TEXT UNIQUE,
             product_name TEXT,
             links TEXT,
+            tiktok_link TEXT,
             caption TEXT,
             status TEXT DEFAULT 'Chưa đăng',
             device_id TEXT,
@@ -146,6 +207,7 @@ def init_db():
             project_name TEXT NOT NULL,
             voice_name TEXT NOT NULL,
             file_path TEXT NOT NULL UNIQUE,
+            tiktok_link TEXT,
             status TEXT DEFAULT 'Chưa chuyển',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
@@ -204,9 +266,20 @@ def log_rendered_video(project_name, voice_name, file_path):
     with db_lock:
         conn = get_connection()
         try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT tiktok_link FROM projects WHERE name = ?", (project_name,))
+            project = cursor.fetchone()
+            tiktok_link = project["tiktok_link"] if project and "tiktok_link" in project.keys() else ""
             conn.execute(
-                "INSERT OR IGNORE INTO rendered_videos (project_name, voice_name, file_path) VALUES (?, ?, ?)",
-                (project_name, voice_name, file_path)
+                """
+                INSERT INTO rendered_videos (project_name, voice_name, file_path, tiktok_link)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(file_path) DO UPDATE SET
+                    project_name = excluded.project_name,
+                    voice_name = excluded.voice_name,
+                    tiktok_link = COALESCE(NULLIF(rendered_videos.tiktok_link, ''), excluded.tiktok_link)
+                """,
+                (project_name, voice_name, file_path, tiktok_link or "")
             )
             conn.commit()
         finally:
@@ -224,12 +297,42 @@ def get_all_rendered_videos(profile_name=None):
                     return []
                 placeholders = ",".join(["?"] * len(names))
                 cursor.execute(
-                    f"SELECT created_at, project_name, voice_name, file_path, status FROM rendered_videos WHERE project_name IN ({placeholders}) ORDER BY id DESC",
+                    f"""
+                    SELECT rv.created_at, rv.project_name, rv.voice_name, rv.file_path,
+                           COALESCE(NULLIF(rv.tiktok_link, ''), p.tiktok_link, '') AS tiktok_link,
+                           rv.status
+                    FROM rendered_videos rv
+                    LEFT JOIN projects p ON p.name = rv.project_name
+                    WHERE rv.project_name IN ({placeholders})
+                    ORDER BY rv.id DESC
+                    """,
                     names,
                 )
             else:
-                cursor.execute("SELECT created_at, project_name, voice_name, file_path, status FROM rendered_videos ORDER BY id DESC")
+                cursor.execute(
+                    """
+                    SELECT rv.created_at, rv.project_name, rv.voice_name, rv.file_path,
+                           COALESCE(NULLIF(rv.tiktok_link, ''), p.tiktok_link, '') AS tiktok_link,
+                           rv.status
+                    FROM rendered_videos rv
+                    LEFT JOIN projects p ON p.name = rv.project_name
+                    ORDER BY rv.id DESC
+                    """
+                )
             return cursor.fetchall()
+        finally:
+            conn.close()
+
+def update_rendered_video_tiktok_link(file_path, tiktok_link):
+    """Cập nhật link sản phẩm TikTok nhập tay theo từng video thành phẩm."""
+    with db_lock:
+        conn = get_connection()
+        try:
+            conn.execute(
+                "UPDATE rendered_videos SET tiktok_link = ? WHERE file_path = ?",
+                (str(tiktok_link or "").strip(), file_path),
+            )
+            conn.commit()
         finally:
             conn.close()
 
@@ -281,6 +384,148 @@ def get_pending_rendered_videos(profile_name=None):
             else:
                 cursor.execute("SELECT file_path FROM rendered_videos WHERE status != 'Đã chuyển'")
             return [r["file_path"] for r in cursor.fetchall()]
+        finally:
+            conn.close()
+
+
+def create_render_jobs(batch_id, profile_name, chat_id, label, render_queue):
+    """Tạo job render và giữ chỗ voice cho một batch bot."""
+    job_ids = []
+    with db_lock:
+        conn = get_connection()
+        try:
+            cursor = conn.cursor()
+            for voice_name, proj_dir, project_name in render_queue:
+                cursor.execute(
+                    """
+                    INSERT INTO render_jobs (batch_id, profile_name, chat_id, label, project_name, voice_name, proj_dir, status)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'queued')
+                    """,
+                    (str(batch_id), str(profile_name or ""), str(chat_id or ""), str(label or ""), project_name, voice_name, proj_dir),
+                )
+                job_id = cursor.lastrowid
+                job_ids.append(job_id)
+                cursor.execute("SELECT id FROM projects WHERE name = ?", (project_name,))
+                project_row = cursor.fetchone()
+                if project_row:
+                    project_id = project_row["id"]
+                else:
+                    cursor.execute("INSERT INTO projects (name) VALUES (?)", (project_name,))
+                    project_id = cursor.lastrowid
+                cursor.execute(
+                    """
+                    UPDATE voices
+                    SET reserved_at = datetime('now', 'localtime'),
+                        reserved_by_job = ?,
+                        last_used = datetime('now', 'localtime')
+                    WHERE project_id = ? AND file_name = ?
+                    """,
+                    (str(job_id), project_id, voice_name),
+                )
+            conn.commit()
+            return job_ids
+        finally:
+            conn.close()
+
+
+def update_render_job(job_id, status, output_path=None, error=None):
+    with db_lock:
+        conn = get_connection()
+        try:
+            fields = ["status = ?"]
+            params = [status]
+            if status == "running":
+                fields.append("started_at = datetime('now', 'localtime')")
+                fields.append("attempts = attempts + 1")
+            if status in ("done", "failed", "cancelled"):
+                fields.append("finished_at = datetime('now', 'localtime')")
+            if output_path is not None:
+                fields.append("output_path = ?")
+                params.append(output_path)
+            if error is not None:
+                fields.append("error = ?")
+                params.append(str(error)[:1200])
+            params.append(job_id)
+            conn.execute(f"UPDATE render_jobs SET {', '.join(fields)} WHERE id = ?", params)
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def list_recent_render_jobs(limit=20, profile_name=None):
+    with db_lock:
+        conn = get_connection()
+        try:
+            cursor = conn.cursor()
+            if profile_name:
+                cursor.execute(
+                    """
+                    SELECT * FROM render_jobs
+                    WHERE profile_name = ?
+                    ORDER BY id DESC LIMIT ?
+                    """,
+                    (profile_name, int(limit)),
+                )
+            else:
+                cursor.execute("SELECT * FROM render_jobs ORDER BY id DESC LIMIT ?", (int(limit),))
+            return cursor.fetchall()
+        finally:
+            conn.close()
+
+
+def cancel_queued_render_jobs(profile_name=None):
+    with db_lock:
+        conn = get_connection()
+        try:
+            if profile_name:
+                cur = conn.execute(
+                    """
+                    UPDATE render_jobs
+                    SET status = 'cancelled', finished_at = datetime('now', 'localtime')
+                    WHERE status = 'queued' AND profile_name = ?
+                    """,
+                    (profile_name,),
+                )
+            else:
+                cur = conn.execute(
+                    """
+                    UPDATE render_jobs
+                    SET status = 'cancelled', finished_at = datetime('now', 'localtime')
+                    WHERE status = 'queued'
+                    """
+                )
+            conn.commit()
+            return cur.rowcount
+        finally:
+            conn.close()
+
+
+def mark_broll_health(project_name, file_name, freeze_score=0.0, error=""):
+    with db_lock:
+        conn = get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT id FROM projects WHERE name = ?", (project_name,))
+            project_row = cursor.fetchone()
+            if project_row:
+                project_id = project_row["id"]
+            else:
+                cursor.execute("INSERT INTO projects (name) VALUES (?)", (project_name,))
+                project_id = cursor.lastrowid
+            freeze_score = float(freeze_score or 0.0)
+            bad_increment = 1 if freeze_score >= 1.5 or error else 0
+            conn.execute(
+                """
+                UPDATE brolls
+                SET freeze_score = MAX(COALESCE(freeze_score, 0), ?),
+                    bad_count = COALESCE(bad_count, 0) + ?,
+                    last_error = CASE WHEN ? != '' THEN ? ELSE last_error END,
+                    status = CASE WHEN COALESCE(bad_count, 0) + ? >= 3 THEN 'inactive' ELSE status END
+                WHERE project_id = ? AND file_name = ?
+                """,
+                (freeze_score, bad_increment, str(error or ""), str(error or "")[:500], bad_increment, project_id, file_name),
+            )
+            conn.commit()
         finally:
             conn.close()
 
@@ -548,6 +793,7 @@ def get_project_payload(project_name):
         "timeline": [],
         "product_context": "",
         "product_name": "",
+        "tiktok_link": "",
         "shopee_out_of_stock": False,
         "product_links": ["", "", "", "", "", ""],
         "ref_img_1": "",
@@ -564,7 +810,7 @@ def get_project_payload(project_name):
             cursor.execute(
                 """
                 SELECT id, product_name, product_context, ref_img_1, ref_img_2,
-                       product_links, shopee_out_of_stock, timeline_json
+                       product_links, tiktok_link, shopee_out_of_stock, timeline_json
                 FROM projects
                 WHERE name = ?
                 """,
@@ -577,6 +823,7 @@ def get_project_payload(project_name):
             db_proj_id = p_row["id"]
             payload = dict(default_payload)
             payload["product_name"] = p_row["product_name"] or ""
+            payload["tiktok_link"] = p_row["tiktok_link"] or ""
             payload["product_context"] = p_row["product_context"] or ""
             payload["ref_img_1"] = p_row["ref_img_1"] or ""
             payload["ref_img_2"] = p_row["ref_img_2"] or ""
@@ -608,7 +855,7 @@ def get_project_payload(project_name):
                     payload["voice_srt_origin"][row["file_name"]] = True
 
             cursor.execute(
-                "SELECT file_name, duration, description, usage_count, keep_audio, status FROM brolls WHERE project_id = ?",
+                "SELECT file_name, duration, description, usage_count, keep_audio, scene_type, ai_recognition_log, status FROM brolls WHERE project_id = ?",
                 (db_proj_id,),
             )
             for row in cursor.fetchall():
@@ -617,6 +864,8 @@ def get_project_payload(project_name):
                     "description": row["description"] or "",
                     "usage_count": int(row["usage_count"] or 0),
                     "keep_audio": bool(row["keep_audio"]),
+                    "scene_type": row["scene_type"] or "",
+                    "ai_recognition_log": row["ai_recognition_log"] or "",
                 }
                 if row["status"] == "trash":
                     payload["trash"][row["file_name"]] = item
@@ -649,6 +898,7 @@ def save_project_payload(project_name, payload, project_status="active"):
                     ref_img_1 = ?,
                     ref_img_2 = ?,
                     product_links = ?,
+                    tiktok_link = ?,
                     shopee_out_of_stock = ?,
                     status = ?,
                     timeline_json = ?
@@ -660,6 +910,7 @@ def save_project_payload(project_name, payload, project_status="active"):
                     payload.get("ref_img_1", ""),
                     payload.get("ref_img_2", ""),
                     json.dumps(product_links, ensure_ascii=False),
+                    payload.get("tiktok_link", ""),
                     1 if payload.get("shopee_out_of_stock", False) else 0,
                     project_status or "active",
                     json.dumps(payload.get("timeline", []), ensure_ascii=False),
@@ -713,13 +964,15 @@ def save_project_payload(project_name, payload, project_status="active"):
                 info = info or {}
                 cursor.execute(
                     """
-                    INSERT INTO brolls (project_id, file_name, duration, description, usage_count, keep_audio, status)
-                    VALUES (?, ?, ?, ?, ?, ?, 'active')
+                    INSERT INTO brolls (project_id, file_name, duration, description, usage_count, keep_audio, scene_type, ai_recognition_log, status)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')
                     ON CONFLICT(project_id, file_name) DO UPDATE SET
                         duration = excluded.duration,
                         description = excluded.description,
                         usage_count = excluded.usage_count,
                         keep_audio = excluded.keep_audio,
+                        scene_type = excluded.scene_type,
+                        ai_recognition_log = excluded.ai_recognition_log,
                         status = 'active'
                     """,
                     (
@@ -729,6 +982,8 @@ def save_project_payload(project_name, payload, project_status="active"):
                         str(info.get("description", "") or ""),
                         int(info.get("usage_count", 0) or 0),
                         1 if info.get("keep_audio", False) else 0,
+                        str(info.get("scene_type", "") or ""),
+                        str(info.get("ai_recognition_log", "") or ""),
                     ),
                 )
 
@@ -736,13 +991,15 @@ def save_project_payload(project_name, payload, project_status="active"):
                 info = info or {}
                 cursor.execute(
                     """
-                    INSERT INTO brolls (project_id, file_name, duration, description, usage_count, keep_audio, status)
-                    VALUES (?, ?, ?, ?, ?, ?, 'trash')
+                    INSERT INTO brolls (project_id, file_name, duration, description, usage_count, keep_audio, scene_type, ai_recognition_log, status)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'trash')
                     ON CONFLICT(project_id, file_name) DO UPDATE SET
                         duration = excluded.duration,
                         description = excluded.description,
                         usage_count = excluded.usage_count,
                         keep_audio = excluded.keep_audio,
+                        scene_type = excluded.scene_type,
+                        ai_recognition_log = excluded.ai_recognition_log,
                         status = 'trash'
                     """,
                     (
@@ -752,6 +1009,8 @@ def save_project_payload(project_name, payload, project_status="active"):
                         str(info.get("description", "") or ""),
                         int(info.get("usage_count", 0) or 0),
                         1 if info.get("keep_audio", False) else 0,
+                        str(info.get("scene_type", "") or ""),
+                        str(info.get("ai_recognition_log", "") or ""),
                     ),
                 )
 
@@ -800,8 +1059,8 @@ def rename_project_name_preserve_data(old_name, new_name, profile_name=None, pro
                     cursor.execute(
                         """
                         INSERT OR IGNORE INTO brolls
-                        (project_id, file_name, duration, description, usage_count, keep_audio, status)
-                        SELECT ?, file_name, duration, description, usage_count, keep_audio, status
+                        (project_id, file_name, duration, description, usage_count, keep_audio, scene_type, ai_recognition_log, status)
+                        SELECT ?, file_name, duration, description, usage_count, keep_audio, scene_type, ai_recognition_log, status
                         FROM brolls
                         WHERE project_id = ?
                         """,
@@ -830,10 +1089,20 @@ def rename_project_name_preserve_data(old_name, new_name, profile_name=None, pro
                                 WHEN COALESCE((SELECT usage_count FROM brolls b2 WHERE b2.project_id = ? AND b2.file_name = brolls.file_name), 0) > usage_count
                                 THEN (SELECT usage_count FROM brolls b2 WHERE b2.project_id = ? AND b2.file_name = brolls.file_name)
                                 ELSE usage_count
+                            END,
+                            scene_type = CASE
+                                WHEN scene_type IS NULL OR TRIM(scene_type) = ''
+                                THEN (SELECT scene_type FROM brolls b2 WHERE b2.project_id = ? AND b2.file_name = brolls.file_name)
+                                ELSE scene_type
+                            END,
+                            ai_recognition_log = CASE
+                                WHEN ai_recognition_log IS NULL OR TRIM(ai_recognition_log) = ''
+                                THEN (SELECT ai_recognition_log FROM brolls b2 WHERE b2.project_id = ? AND b2.file_name = brolls.file_name)
+                                ELSE ai_recognition_log
                             END
                         WHERE project_id = ?
                         """,
-                        (old_id, old_id, old_id, old_id, old_id, new_id),
+                        (old_id, old_id, old_id, old_id, old_id, old_id, old_id, new_id),
                     )
 
                     # Gộp voices: thêm file chưa có, cập nhật srt/usage còn trống.

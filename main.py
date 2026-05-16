@@ -74,6 +74,7 @@ from tab9_script_analysis import ScriptAnalysisTab
 from tab10_config import ConfigTab
 from tab12_voice import TabVoice
 from tab13_web_auto_post import WebAutoPostTab
+from tab15_cover_tool import CoverToolTab
 
 # [ĐÃ SỬA] DÙNG BASE_PATH ĐỂ TẠO THƯ MỤC CẠNH FILE EXE CHỨ KHÔNG PHẢI TRONG TEMP
 WORKSPACE_DIR = ""
@@ -360,6 +361,10 @@ class MainApp:
         self.active_profile = set_active_profile(new_profile_name)
         refresh_runtime_paths(self.active_profile)
         self.config["active_profile"] = self.active_profile
+        profile_cover = self.config.get("profile_enable_cover", {})
+        if isinstance(profile_cover, dict) and old_profile in profile_cover:
+            profile_cover[new_profile_name] = profile_cover.pop(old_profile)
+            self.config["profile_enable_cover"] = profile_cover
         self.save_config()
         self.projects = self.load_projects()
 
@@ -536,6 +541,12 @@ class MainApp:
         except Exception as exc:
             return messagebox.showerror("Lỗi xóa", f"Đã chuyển project nhưng chưa xóa được thư mục tài khoản:\n{exc}")
 
+        profile_cover = self.config.get("profile_enable_cover", {})
+        if isinstance(profile_cover, dict) and selected_profile in profile_cover:
+            profile_cover.pop(selected_profile, None)
+            self.config["profile_enable_cover"] = profile_cover
+            self.save_config()
+
         self._refresh_profile_selector()
         if hasattr(self, "tab1"):
             self.tab1.refresh_project_list()
@@ -669,6 +680,7 @@ class MainApp:
             "timeline": [],
             "product_context": "",
             "product_name": "",
+            "tiktok_link": "",
             "shopee_out_of_stock": False,
             "product_links": ["", "", "", "", "", ""],
             "ref_img_1": "",
@@ -733,6 +745,7 @@ class MainApp:
         self.frame_tab5 = tk.Frame(self.notebook, bg="#f4f6f9")
         self.frame_tab11 = tk.Frame(self.notebook, bg="#f4f6f9")
         self.frame_tab13 = tk.Frame(self.notebook, bg="#f4f6f9")
+        self.frame_tab15 = tk.Frame(self.notebook, bg="#f4f6f9")
         
         self.notebook.add(self.frame_tab1, text=" 📂KHO CẢNH TRÁM ")
         self.notebook.add(self.frame_tab2, text=" 🚀 EDIT VIDEO ĐA LUỒNG ")
@@ -740,6 +753,7 @@ class MainApp:
         self.notebook.add(self.frame_tab5, text=" 📱 QUẢN LÝ ĐIỆN THOẠI ")
         self.notebook.add(self.frame_tab11, text=" 🚜 AUTO ĐĂNG SHOPEE ")
         self.notebook.add(self.frame_tab13, text=" 🌐 TAB 13 WEB AUTO ")
+        self.notebook.add(self.frame_tab15, text=" 🖼️ LÀM ẢNH BÌA ")
         
         self.tab1 = BRollTab(self.frame_tab1, self)
         self.tab2 = FacelessTab(self.frame_tab2, self)
@@ -747,6 +761,7 @@ class MainApp:
         self.tab5 = PhoneManagerTab(self.frame_tab5, self)
         self.tab11 = AutoPostTab(self.frame_tab11, self)
         self.tab13 = WebAutoPostTab(self.frame_tab13, self)
+        self.tab15 = CoverToolTab(self.frame_tab15, self)
 
         # [ĐÃ XÓA] TikTok Upload Tab
 

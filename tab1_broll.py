@@ -15,7 +15,7 @@ from PIL import Image, ImageTk
 from tab1_modules.thumbnail_maker import ThumbnailHandler
 from tab1_modules.ai_vision import AIVisionHandler
 from tab2_modules.ai_services import get_transcription
-from shopee_export import normalize_shopee_product_link
+from shopee_export import normalize_shopee_product_link, normalize_tiktok_product_link
 
 class BRollTab:
     def __init__(self, parent, main_app):
@@ -28,6 +28,7 @@ class BRollTab:
         self.product_link_entries = []
         self.ent_tiktok_link = None  # [MỚI] TikTok link entry
         self.audio_vars = {}
+        self.product_name_var = tk.StringVar(master=self.parent)
         self.active_page = 1
         self.trash_page = 1
         self.items_per_page = 30
@@ -161,6 +162,35 @@ class BRollTab:
         self.btn_auto_tag_page = tk.Button(btn_ai_fr, text="📄 AI SOI TRANG", bg="#e67e22", fg="white", font=("Arial", 9, "bold"), command=self.start_auto_tag_current_page, height=2)
         self.btn_auto_tag_page.pack(side="left", fill="x", expand=True, padx=(0, 5))
 
+        ai_mode_fr = tk.Frame(fr_tools, bg="#ffffff")
+        ai_mode_fr.pack(fill="x", padx=10, pady=(6, 4))
+        tk.Label(ai_mode_fr, text="Cách soi AI:", bg="#ffffff", font=("Arial", 9, "bold"), fg="#34495e").pack(side="left")
+        self.ai_vision_mode_var = tk.StringVar(value=self.main_app.config.get("ai_vision_mode", "fast"))
+        self.cmb_ai_vision_mode = ttk.Combobox(
+            ai_mode_fr,
+            textvariable=self.ai_vision_mode_var,
+            state="readonly",
+            values=("Nhanh - ảnh ghép", "Kỹ - 5 ảnh rời"),
+            width=18,
+            font=("Arial", 9),
+        )
+        self.cmb_ai_vision_mode.pack(side="left", padx=(8, 0))
+        self.cmb_ai_vision_mode.bind("<<ComboboxSelected>>", self._save_ai_vision_mode)
+        self._sync_ai_vision_mode_label()
+
+        tk.Label(ai_mode_fr, text="Tin cậy:", bg="#ffffff", font=("Arial", 9, "bold"), fg="#34495e").pack(side="left", padx=(14, 0))
+        self.ai_confidence_var = tk.StringVar(value=str(self.main_app.config.get("ai_confidence_threshold", 70)))
+        self.cmb_ai_confidence = ttk.Combobox(
+            ai_mode_fr,
+            textvariable=self.ai_confidence_var,
+            state="readonly",
+            values=("60", "70", "80", "90"),
+            width=4,
+            font=("Arial", 9),
+        )
+        self.cmb_ai_confidence.pack(side="left", padx=(6, 0))
+        self.cmb_ai_confidence.bind("<<ComboboxSelected>>", self._save_ai_confidence_threshold)
+
         # [MỚI THÊM] BỘ ĐẾM SỐ LƯỢNG MÔ TẢ TRỐNG
         self.lbl_missing_desc = tk.Label(btn_ai_fr, text="Đang tính...", font=("Arial", 10, "bold"), fg="#c0392b", bg="#ffffff")
         self.lbl_missing_desc.pack(side="left", padx=10)
@@ -211,14 +241,14 @@ class BRollTab:
         row_name.pack(fill="x", pady=(0, 6))
         tk.Label(
             row_name,
-            text="Tên sản phẩm:",
+            text="SP chính:",
             bg="#ffffff",
             fg="#8e44ad",
             font=("Arial", 10, "bold"),
             width=14,
             anchor="w",
         ).pack(side="left")
-        self.ent_product_name = tk.Entry(row_name, font=("Arial", 10))
+        self.ent_product_name = tk.Entry(row_name, textvariable=self.product_name_var, font=("Arial", 10))
         self.ent_product_name.pack(side="left", fill="x", expand=True)
         self.ent_product_name.bind("<KeyRelease>", self._on_product_info_change)
 
@@ -1106,6 +1136,100 @@ class BRollTab:
         except Exception:
             pass
 
+    def _get_ai_vision_mode(self):
+        if hasattr(self, "ai_vision_mode_var"):
+            value = self.ai_vision_mode_var.get().strip().lower()
+            if value.startswith("kỹ") or value.startswith("ky"):
+                return "deep"
+            if value.startswith("nhanh"):
+                return "fast"
+            if value in ("deep", "fast"):
+                return value
+        mode = str(self.main_app.config.get("ai_vision_mode", "fast")).strip().lower()
+        return mode if mode in ("fast", "deep") else "fast"
+
+    def _sync_ai_vision_mode_label(self):
+        if not hasattr(self, "ai_vision_mode_var"):
+            return
+        mode = str(self.main_app.config.get("ai_vision_mode", "fast")).strip().lower()
+        self.ai_vision_mode_var.set("Kỹ - 5 ảnh rời" if mode == "deep" else "Nhanh - ảnh ghép")
+
+    def _save_ai_vision_mode(self, event=None):
+        mode = self._get_ai_vision_mode()
+        self.main_app.config["ai_vision_mode"] = mode
+        self.main_app.save_config()
+        self._sync_ai_vision_mode_label()
+
+    def _save_ai_confidence_threshold(self, event=None):
+        try:
+            threshold = int(self.ai_confidence_var.get())
+        except (TypeError, ValueError):
+            threshold = 70
+        threshold = max(0, min(100, threshold))
+        self.main_app.config["ai_confidence_threshold"] = threshold
+        self.ai_confidence_var.set(str(threshold))
+        self.main_app.save_config()
+
+    def get_ai_learning_examples(self, project_id, exclude_vid_name="", limit=4):
+        if not project_id or project_id not in self.main_app.projects:
+            return []
+        import database
+        examples = []
+        try:
+            proj_name = self.main_app.projects[project_id]["name"]
+            db_proj_id = database.get_or_create_project(proj_name)
+            with database.db_lock:
+                conn = database.get_connection()
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT file_name, description, scene_type
+                    FROM brolls
+                    WHERE project_id = ? AND status = 'active' AND TRIM(COALESCE(description, '')) != ''
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (db_proj_id, max(1, limit * 3)),
+                )
+                rows = cursor.fetchall()
+                conn.close()
+            for row in rows:
+                file_name = row["file_name"]
+                desc = str(row["description"] or "").strip()
+                if not desc or file_name == exclude_vid_name or self._is_transient_ai_message(desc):
+                    continue
+                examples.append({"description": desc, "scene_type": row["scene_type"] or ""})
+                if len(examples) >= limit:
+                    break
+        except Exception:
+            pass
+        return examples
+
+    def save_ai_broll_metadata(self, project_id, vid_name, scene_type="", recognition_log=""):
+        if not project_id or project_id not in self.main_app.projects or not vid_name:
+            return
+        import database
+        try:
+            proj_name = self.main_app.projects[project_id]["name"]
+            db_proj_id = database.get_or_create_project(proj_name)
+            with database.db_lock:
+                conn = database.get_connection()
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    INSERT INTO brolls (project_id, file_name, status, scene_type, ai_recognition_log)
+                    VALUES (?, ?, 'active', ?, ?)
+                    ON CONFLICT(project_id, file_name) DO UPDATE SET
+                        scene_type = CASE WHEN excluded.scene_type != '' THEN excluded.scene_type ELSE scene_type END,
+                        ai_recognition_log = CASE WHEN excluded.ai_recognition_log != '' THEN excluded.ai_recognition_log ELSE ai_recognition_log END
+                    """,
+                    (db_proj_id, vid_name, str(scene_type or ""), str(recognition_log or "")),
+                )
+                conn.commit()
+                conn.close()
+        except Exception as exc:
+            print(f"Lỗi lưu metadata AI broll: {exc}")
+
     def _transcribe_voice_with_auto_trim(self, project_id, voice_name, voice_path):
         mode = self._get_transcription_mode()
         log_cb = lambda msg, pid=project_id: self._log_extract(msg, project_id=pid)
@@ -1451,6 +1575,7 @@ class BRollTab:
                     "timeline": [],
                     "product_context": "",
                     "product_name": "",
+                    "tiktok_link": "",
                     "shopee_out_of_stock": False,
                     "product_links": ["", "", "", "", "", ""],
                 },
@@ -1467,6 +1592,9 @@ class BRollTab:
         focused = self.tree_proj.focus()
         next_project_id = focused if focused in self.main_app.projects else selected[-1]
         if next_project_id not in self.main_app.projects:
+            return
+
+        if next_project_id == self.current_project_id:
             return
 
         if self.current_project_id and self.current_project_id != next_project_id:
@@ -1494,8 +1622,8 @@ class BRollTab:
         # Load ảnh mẫu ra UI
         ref1 = p_data.get("ref_img_1", "")
         ref2 = p_data.get("ref_img_2", "")
-        self.lbl_ref1.config(text=self._format_ref_image_name(ref1), fg="#27ae60" if ref1 else "gray")
-        self.lbl_ref2.config(text=self._format_ref_image_name(ref2), fg="#27ae60" if ref2 else "gray")
+        self.lbl_ref1.config(text=self._format_ref_image_name(ref1), fg="#27ae60" if ref1 and os.path.exists(ref1) else "gray")
+        self.lbl_ref2.config(text=self._format_ref_image_name(ref2), fg="#27ae60" if ref2 and os.path.exists(ref2) else "gray")
 
         if hasattr(self.main_app, "tab12"):
             self.main_app.tab12.set_project(self.current_project_id)
@@ -1776,23 +1904,15 @@ class BRollTab:
         self._update_pagination_ui("active", act_total, self.active_page, act_total_pages)
         self._update_pagination_ui("trash", tr_total, self.trash_page, tr_total_pages)
 
-        if act_total == 0:
-            empty_active_text = "Không tìm thấy cảnh nào phù hợp." if keyword else "Chưa có cảnh nào trong danh sách đang dùng."
-            tk.Label(self.frame_act, text=empty_active_text, fg="#7f8c8d", font=("Arial", 10, "italic")).pack(pady=20)
-
-        if tr_total == 0:
-            empty_trash_text = "Không có cảnh nào trong thùng rác khớp từ khóa." if keyword else "Thùng rác đang trống."
-            tk.Label(self.frame_tr, text=empty_trash_text, fg="#7f8c8d", font=("Arial", 10, "italic")).pack(pady=20)
-
-        self.update_missing_desc_count()
-
         if not act_files and not tr_files:
+            empty_active_text = "Không tìm thấy cảnh nào phù hợp." if keyword else "Chưa có cảnh nào trong danh sách đang dùng."
+            empty_trash_text = "Không có cảnh nào trong thùng rác khớp từ khóa." if keyword else "Thùng rác đang trống."
+            tk.Label(self.frame_act, text=empty_active_text, fg="#7f8c8d", font=("Arial", 10, "italic")).pack(pady=20)
+            tk.Label(self.frame_tr, text=empty_trash_text, fg="#7f8c8d", font=("Arial", 10, "italic")).pack(pady=20)
+            self.update_missing_desc_count()
             return
 
-        if act_files:
-            tk.Label(self.frame_act, text="⏳ Đang load ảnh...", fg="#e67e22").pack(pady=10)
-        if tr_files:
-            tk.Label(self.frame_tr, text="⏳ Đang load ảnh...", fg="#e67e22").pack(pady=10)
+        self._build_video_rows(project_id, broll_dir, trash_dir, act_files, tr_files, p_data, current_request_id)
         
         threading.Thread(
             target=self.thumb_handler.generate,
@@ -1935,7 +2055,11 @@ class BRollTab:
             col2.grid(row=0, column=2, sticky="nw", padx=5)
             
             dur = b_data.get('duration', 0)
-            tk.Label(col2, text=f"🎥 {vid_name}\n⏳ {dur} giây", font=("Arial", 9, "bold"), bg="#ffffff", justify="left", wraplength=330).pack(anchor="nw", pady=(0, 5))
+            scene_type_text = b_data.get('scene_type', '')
+            info_text = f"🎥 {vid_name}\n⏳ {dur} giây"
+            if scene_type_text:
+                info_text += f"\n🏷️ {scene_type_text}"
+            tk.Label(col2, text=info_text, font=("Arial", 9, "bold"), bg="#ffffff", justify="left", wraplength=330).pack(anchor="nw", pady=(0, 5))
             
             btn_fr1 = tk.Frame(col2, bg="#ffffff")
             btn_fr1.pack(anchor="nw", pady=2)
@@ -1947,6 +2071,7 @@ class BRollTab:
 
             tk.Button(btn_fr2, text="📸 Làm mới", bg="#3498db", fg="white", font=("Arial", 8, "bold"), width=8, command=lambda v=vid_name: self.refresh_single_thumbnail(v)).pack(side="left", padx=(0, 5))
             tk.Button(btn_fr2, text="🤖 AI Soi", bg="#d35400", fg="white", font=("Arial", 8, "bold"), width=8, command=lambda v=vid_name: self.start_single_auto_tag(v)).pack(side="left", padx=(0, 5))
+            tk.Button(btn_fr2, text="🔎 AI Kỹ", bg="#8e44ad", fg="white", font=("Arial", 8, "bold"), width=8, command=lambda v=vid_name: self.start_single_deep_auto_tag(v)).pack(side="left", padx=(0, 5))
             tk.Button(btn_fr2, text="🔄 Thay", bg="#f39c12", fg="white", font=("Arial", 8, "bold"), width=8, command=lambda v=vid_name: self.replace_video(v)).pack(side="left", padx=(0, 5))
             tk.Button(btn_fr2, text="🗑️ Xóa", bg="#e74c3c", fg="white", font=("Arial", 8, "bold"), width=8, command=lambda v=vid_name: self.move_to_trash(v)).pack(side="left")
 
@@ -2117,12 +2242,11 @@ class BRollTab:
         self.main_app.save_project_data(self.current_project_id, p_data)
 
     def _load_product_info(self, p_data):
-        self.ent_product_name.delete(0, tk.END)
-        self.ent_product_name.insert(0, p_data.get("product_name", ""))
+        self.product_name_var.set(p_data.get("product_name", ""))
         # [MỚI] Load link TikTok
         if self.ent_tiktok_link:
             self.ent_tiktok_link.delete(0, tk.END)
-            self.ent_tiktok_link.insert(0, p_data.get("tiktok_link", ""))
+            self.ent_tiktok_link.insert(0, normalize_tiktok_product_link(p_data.get("tiktok_link", "")))
         self.var_shopee_out_of_stock.set(bool(p_data.get("shopee_out_of_stock", False)))
 
         links = p_data.get("product_links", [])
@@ -2158,12 +2282,16 @@ class BRollTab:
         cleaned_links = [self._normalize_product_link_entry(entry) for entry in self.product_link_entries]
 
         p_data = self.main_app.get_project_data(self.current_project_id)
-        p_data["product_name"] = self.ent_product_name.get().strip()
+        p_data["product_name"] = self.product_name_var.get().strip()
         p_data["shopee_out_of_stock"] = bool(self.var_shopee_out_of_stock.get())
         p_data["product_links"] = cleaned_links
         # [MỚI] Lưu link TikTok
         if self.ent_tiktok_link:
-            p_data["tiktok_link"] = self.ent_tiktok_link.get().strip()
+            tiktok_link = normalize_tiktok_product_link(self.ent_tiktok_link.get())
+            if tiktok_link != self.ent_tiktok_link.get().strip():
+                self.ent_tiktok_link.delete(0, tk.END)
+                self.ent_tiktok_link.insert(0, tiktok_link)
+            p_data["tiktok_link"] = tiktok_link
         self.main_app.save_project_data(self.current_project_id, p_data)
 
     def start_auto_tag(self):
@@ -2211,7 +2339,9 @@ class BRollTab:
 
         ref1 = p_data.get("ref_img_1", "")
         ref2 = p_data.get("ref_img_2", "")
-        threading.Thread(target=self.ai_handler.process_auto_tag, args=(project_id, videos_to_tag, self.main_app.config, context, ref1, ref2), daemon=True).start()
+        vision_mode = self._get_ai_vision_mode()
+        product_name = p_data.get("product_name", "")
+        threading.Thread(target=self.ai_handler.process_auto_tag, args=(project_id, videos_to_tag, self.main_app.config, context, ref1, ref2, vision_mode, product_name), daemon=True).start()
 
     def start_auto_tag_current_page(self):
         if not self.current_project_id:
@@ -2258,7 +2388,9 @@ class BRollTab:
 
         ref1 = p_data.get("ref_img_1", "")
         ref2 = p_data.get("ref_img_2", "")
-        threading.Thread(target=self.ai_handler.process_auto_tag, args=(project_id, videos_to_tag, self.main_app.config, context, ref1, ref2), daemon=True).start()
+        vision_mode = self._get_ai_vision_mode()
+        product_name = p_data.get("product_name", "")
+        threading.Thread(target=self.ai_handler.process_auto_tag, args=(project_id, videos_to_tag, self.main_app.config, context, ref1, ref2, vision_mode, product_name), daemon=True).start()
 
     def start_single_auto_tag(self, vid_name):
         if not self.current_project_id: return
@@ -2291,7 +2423,45 @@ class BRollTab:
         p_data = self.main_app.get_project_data(project_id)
         ref1 = p_data.get("ref_img_1", "")
         ref2 = p_data.get("ref_img_2", "")
-        threading.Thread(target=self.ai_handler.process_single_tag, args=(project_id, task_token, self.main_app.config, vid_name, context, ref1, ref2, hint_text), daemon=True).start()
+        vision_mode = self._get_ai_vision_mode()
+        product_name = p_data.get("product_name", "")
+        threading.Thread(target=self.ai_handler.process_single_tag, args=(project_id, task_token, self.main_app.config, vid_name, context, ref1, ref2, hint_text, vision_mode, product_name), daemon=True).start()
+
+    def start_single_deep_auto_tag(self, vid_name):
+        if not self.current_project_id:
+            return
+
+        provider = self.main_app.config.get("ai_provider", "kie")
+        if provider == "shopaikey":
+            key_field = "shopaikey_key"
+        elif provider == "openai":
+            key_field = "openai_key"
+        else:
+            key_field = "kie_key"
+        if not self.main_app.config.get(key_field, ""):
+            return messagebox.showerror("Lỗi", f"Chưa cấu hình {key_field.replace('_', ' ').title()}! Vui lòng cài đặt trong Tab 10.")
+
+        project_id = self.current_project_id
+        context = self.txt_context.get("1.0", tk.END).strip()
+        hint_text = ""
+        if vid_name in self.desc_entries:
+            try:
+                current_text = self.desc_entries[vid_name].get("1.0", tk.END).strip()
+                if current_text and not self._is_transient_ai_message(current_text):
+                    hint_text = current_text
+            except tk.TclError:
+                pass
+
+        task_token = self._start_ai_task(project_id, vid_name, "⏳ AI đang soi kỹ 2 tầng, sếp đợi xíu...")
+        p_data = self.main_app.get_project_data(project_id)
+        ref1 = p_data.get("ref_img_1", "")
+        ref2 = p_data.get("ref_img_2", "")
+        product_name = p_data.get("product_name", "")
+        threading.Thread(
+            target=self.ai_handler.process_single_deep_tag,
+            args=(project_id, task_token, self.main_app.config, vid_name, context, ref1, ref2, hint_text, product_name),
+            daemon=True,
+        ).start()
 
 
     # =======================================================
@@ -2423,12 +2593,21 @@ class BRollTab:
             filetypes=[("Images", "*.jpg *.jpeg *.png *.webp"), ("All files", "*.*")]
         )
         if file_path:
+            ref_dir = os.path.join(self.main_app.get_proj_dir(self.current_project_id), "Ref_Images")
+            os.makedirs(ref_dir, exist_ok=True)
+
+            _, ext = os.path.splitext(file_path)
+            ext = ext.lower() if ext else ".jpg"
+            target_path = os.path.join(ref_dir, f"ref_img_{num}{ext}")
+            if os.path.abspath(file_path) != os.path.abspath(target_path):
+                shutil.copy2(file_path, target_path)
+
             p_data = self.main_app.get_project_data(self.current_project_id)
-            p_data[f"ref_img_{num}"] = file_path
+            p_data[f"ref_img_{num}"] = target_path
             self.main_app.save_project_data(self.current_project_id, p_data)
             
             lbl = self.lbl_ref1 if num == 1 else self.lbl_ref2
-            lbl.config(text=self._format_ref_image_name(file_path), fg="#27ae60")
+            lbl.config(text=self._format_ref_image_name(target_path), fg="#27ae60")
 
     def clear_ref_images(self):
         if not self.current_project_id: return
@@ -2604,6 +2783,7 @@ class BRollTab:
                     "timeline": [],
                     "product_context": "",
                     "product_name": "",
+                    "tiktok_link": "",
                     "shopee_out_of_stock": False,
                     "product_links": ["", "", "", "", "", ""],
                     "ref_img_1": "",

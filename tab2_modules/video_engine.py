@@ -2,6 +2,7 @@ import os
 import random
 import subprocess
 import json
+import re
 import shutil
 import threading # [MỚI] IMPORT THƯ VIỆN KHÓA
 import time
@@ -151,6 +152,103 @@ def _choose_cover_layout(draw, source_text, img_w, img_h, custom_font):
     return source_text, fallback_font, 3, 6
 
 
+def add_cover_to_existing_video(input_video, out_file, cover_text, custom_font="", log_cb=None):
+    """Gắn ảnh bìa đầu video ngoài bằng cùng logic bìa đang dùng khi render Tab 2."""
+    def log(message):
+        if log_cb:
+            log_cb(message)
+
+    if not os.path.exists(input_video):
+        raise FileNotFoundError(input_video)
+
+    out_dir = os.path.dirname(out_file) or os.getcwd()
+    os.makedirs(out_dir, exist_ok=True)
+    creation_flags = 0x08000000 if os.name == "nt" else 0
+    safe_stem = os.path.splitext(os.path.basename(input_video))[0]
+    temp_token = f"external_{safe_stem}_{int(time.time() * 1000)}_{threading.get_ident()}"
+    temp_frame_jpg = os.path.join(out_dir, f"temp_frame_{temp_token}.jpg")
+    temp_cover_png = os.path.join(out_dir, f"temp_cover_{temp_token}.png")
+
+    frame_ready = False
+    frame_error = ""
+    for point in [1.0, 0.5, 0.0]:
+        frame_result = subprocess.run(
+            ["ffmpeg", "-y", "-ss", f"{point:.2f}", "-i", input_video, "-frames:v", "1", "-q:v", "2", temp_frame_jpg],
+            capture_output=True, text=True, encoding="utf-8", errors="ignore", creationflags=creation_flags,
+        )
+        if frame_result.returncode == 0 and os.path.exists(temp_frame_jpg) and os.path.getsize(temp_frame_jpg) > 0:
+            frame_ready = True
+            break
+        frame_error = (frame_result.stderr or frame_result.stdout or "Không rõ lỗi")[-400:]
+
+    clean_cover_text = " ".join(str(cover_text or safe_stem).replace("_", " ").split()).upper()
+    try:
+        if frame_ready:
+            with Image.open(temp_frame_jpg).convert("RGBA") as img:
+                draw = ImageDraw.Draw(img)
+                img_w, img_h = img.size
+                display_text, font, stroke_w, line_spacing = _choose_cover_layout(draw, clean_cover_text, img_w, img_h, custom_font)
+                draw.multiline_text(
+                    (img_w / 2, img_h / 2),
+                    display_text,
+                    font=font,
+                    fill="white",
+                    align="center",
+                    anchor="mm",
+                    spacing=line_spacing,
+                    stroke_width=stroke_w,
+                    stroke_fill="black",
+                )
+                img.convert("RGB").save(temp_cover_png)
+        else:
+            img = Image.new("RGBA", (1080, 1920), (22, 28, 36, 255))
+            draw = ImageDraw.Draw(img)
+            display_text, font, stroke_w, line_spacing = _choose_cover_layout(draw, clean_cover_text, 1080, 1920, custom_font)
+            draw.multiline_text(
+                (540, 960),
+                display_text,
+                font=font,
+                fill="white",
+                align="center",
+                anchor="mm",
+                spacing=line_spacing,
+                stroke_width=stroke_w,
+                stroke_fill="black",
+            )
+            img.convert("RGB").save(temp_cover_png)
+            log(f"⚠️ Không trích được frame làm bìa, dùng bìa nền dự phòng. {frame_error[:120]}")
+
+        ffmpeg_concat_cmd = [
+            "ffmpeg", "-y", "-loop", "1", "-t", "0.1", "-i", temp_cover_png, "-i", input_video,
+            "-filter_complex", "[0:v][1:v]concat=n=2:v=1:a=0[v]", "-map", "[v]", "-map", "1:a?",
+            "-c:v", "h264_nvenc", "-preset", "p1", "-b:v", "8000k", "-c:a", "copy", out_file,
+        ]
+        concat_result = subprocess.run(ffmpeg_concat_cmd, capture_output=True, text=True, errors="ignore", creationflags=creation_flags)
+        final_ready = concat_result.returncode == 0 and os.path.exists(out_file) and os.path.getsize(out_file) > 0
+
+        if not final_ready:
+            ffmpeg_concat_fallback_cmd = [
+                "ffmpeg", "-y", "-loop", "1", "-t", "0.1", "-i", temp_cover_png, "-i", input_video,
+                "-filter_complex", "[0:v][1:v]concat=n=2:v=1:a=0[v]", "-map", "[v]", "-map", "1:a?",
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-c:a", "aac", "-b:a", "192k", out_file,
+            ]
+            fallback_result = subprocess.run(ffmpeg_concat_fallback_cmd, capture_output=True, text=True, errors="ignore", creationflags=creation_flags)
+            final_ready = fallback_result.returncode == 0 and os.path.exists(out_file) and os.path.getsize(out_file) > 0
+            if final_ready:
+                log("⚠️ NVENC gắn bìa lỗi, đã fallback sang libx264 thành công.")
+
+        if not final_ready:
+            raise Exception("Không gắn được ảnh bìa vào video ngoài.")
+        return out_file
+    finally:
+        for f_path in [temp_frame_jpg, temp_cover_png]:
+            if os.path.exists(f_path):
+                try:
+                    os.remove(f_path)
+                except Exception:
+                    pass
+
+
 def _resolve_media_asset(*file_names):
     candidates = []
     for file_name in file_names:
@@ -259,6 +357,27 @@ def apply_video_speed_after_render(video_path, speed, log_cb):
     os.replace(temp_path, video_path)
     return video_path
 
+
+def detect_freeze_score(video_path, freeze_seconds=1.5):
+    """Trả về tổng số giây bị đứng hình theo ffmpeg freezedetect."""
+    if not os.path.exists(video_path):
+        return 0.0
+    creation_flags = 0x08000000 if os.name == 'nt' else 0
+    cmd = [
+        "ffmpeg", "-hide_banner", "-nostats", "-i", video_path,
+        "-vf", f"freezedetect=n=-60dB:d={float(freeze_seconds):.2f}",
+        "-f", "null", "-",
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore", creationflags=creation_flags)
+    text = (result.stderr or "") + "\n" + (result.stdout or "")
+    total = 0.0
+    for match in re.finditer(r"freeze_duration:\s*([0-9.]+)", text):
+        try:
+            total += float(match.group(1))
+        except Exception:
+            pass
+    return total
+
 # [BẢN ĐỘ MỚI - FIX LỖI HỤT VIDEO] 
 def render_faceless_video(voice_name, voice_path, timeline, proj_dir, proj_name, config, out_file, out_dir, log_cb, broll_data=None):
     used_brolls = []
@@ -318,7 +437,11 @@ def render_faceless_video(voice_name, voice_path, timeline, proj_dir, proj_name,
                     available = all_brolls
                 if len(available) > 1 and last_vid_name in available: available.remove(last_vid_name)
                 
-                available.sort(key=lambda v: broll_data.get(v, {}).get('usage_count', 0))
+                available.sort(key=lambda v: (
+                    broll_data.get(v, {}).get('bad_count', 0),
+                    broll_data.get(v, {}).get('freeze_score', 0),
+                    broll_data.get(v, {}).get('usage_count', 0),
+                ))
                 top_candidates = available[:3] 
                 v_n = random.choice(top_candidates)
             
@@ -347,8 +470,9 @@ def render_faceless_video(voice_name, voice_path, timeline, proj_dir, proj_name,
                 vid_offsets[v_n] = start_t + consume_dur
                 
             else:
+                missing_dur = rem - avail_dur
                 needed_speed = avail_dur / rem
-                if needed_speed >= 0.8:
+                if missing_dur < 1.0 and needed_speed >= 0.95:
                     scene_vids.append({'path': v_path, 'name': v_n, 'start_t': start_t, 'trim': avail_dur, 'speed': needed_speed, 'has_audio': has_audio})
                     current_dur += rem
                 else:
@@ -420,7 +544,7 @@ def render_faceless_video(voice_name, voice_path, timeline, proj_dir, proj_name,
                 # ✅ FIX 3: Đồng bộ audio phụ theo đúng tốc độ mới
                 speed_factor = clip['speed']
                 delay_ms = int(clip_time * 1000)
-                atempo_str = f"atempo={speed_factor}," if speed_factor != 1.0 else ""
+                atempo_str = f"{_build_atempo_chain(speed_factor)}," if speed_factor != 1.0 else ""
                 
                 flt_a = (
                     f"[{vid_input_idx}:a]atrim={clip['start_t']:.3f}:{end_t:.3f},asetpts=PTS-STARTPTS,"
@@ -563,6 +687,22 @@ def render_faceless_video(voice_name, voice_path, timeline, proj_dir, proj_name,
     temp_frame_jpg = os.path.join(out_dir, f"temp_frame_{temp_token}.jpg")
     temp_cover_png = os.path.join(out_dir, f"temp_cover_{temp_token}.png")
 
+    if not config.get("enable_cover", True):
+        shutil.copy2(temp_main_mp4, out_file)
+        if not (os.path.exists(out_file) and os.path.getsize(out_file) > 0):
+            raise Exception(f"Không lưu được video đầu ra cho {voice_name}")
+        log_cb(f"[{voice_name}] ⏭️ Tài khoản này tắt làm ảnh bìa, xuất video không gắn bìa.")
+        for f_path in [filter_script_path, temp_main_mp4, temp_frame_jpg, temp_cover_png]:
+            if os.path.exists(f_path):
+                try: os.remove(f_path)
+                except: pass
+        shopee_out_of_stock = is_shopee_out_of_stock_project(proj_dir)
+        from shopee_export import export_rendered_video_to_shopee_files
+        exported_to_shopee, _ = export_rendered_video_to_shopee_files(proj_dir, out_file, config=config, default_status="Chưa đăng")
+        if shopee_out_of_stock: log_cb(f"[{voice_name}] ⏭️ Shopee Hết hàng, bỏ qua lưu Job.")
+        elif exported_to_shopee: log_cb(f"[{voice_name}] ✅ Đã lưu Job Shopee thành công!")
+        return list(global_used_vids)
+
     extract_points = []
     if voice_dur > 2.0:
         random_sec = round(random.uniform(1.0, voice_dur - 1.0), 2)
@@ -677,7 +817,11 @@ def render_faceless_video_with_base(voice_name, voice_path, timeline, proj_dir, 
         raise Exception("Không tìm thấy video Broll nào trong project!")
 
     def pick_loose_broll():
-        candidates = sorted(all_brolls, key=lambda v: broll_data.get(v, {}).get("usage_count", 0))
+        candidates = sorted(all_brolls, key=lambda v: (
+            broll_data.get(v, {}).get("bad_count", 0),
+            broll_data.get(v, {}).get("freeze_score", 0),
+            broll_data.get(v, {}).get("usage_count", 0),
+        ))
         top = candidates[:5] if len(candidates) > 5 else candidates
         return random.choice(top) if top else random.choice(all_brolls)
 
@@ -871,6 +1015,19 @@ def render_faceless_video_with_base(voice_name, voice_path, timeline, proj_dir, 
     temp_token = f"{safe_stem}_{int(time.time() * 1000)}_{threading.get_ident()}"
     temp_frame_jpg = os.path.join(out_dir, f"temp_frame_{temp_token}.jpg")
     temp_cover_png = os.path.join(out_dir, f"temp_cover_{temp_token}.png")
+
+    if not config.get("enable_cover", True):
+        shutil.copy2(temp_main_mp4, out_file)
+        if not (os.path.exists(out_file) and os.path.getsize(out_file) > 0):
+            raise Exception(f"Không lưu được video đầu ra cho {voice_name}")
+        log_cb(f"[{voice_name}] ⏭️ Tài khoản này tắt làm ảnh bìa, xuất video không gắn bìa.")
+        for f_path in [filter_script_path, temp_main_mp4, temp_frame_jpg, temp_cover_png]:
+            if os.path.exists(f_path):
+                try:
+                    os.remove(f_path)
+                except Exception:
+                    pass
+        return list(dict.fromkeys(used_brolls))
 
     extract_points = []
     if voice_dur > 2.0:

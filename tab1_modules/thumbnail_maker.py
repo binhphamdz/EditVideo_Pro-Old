@@ -101,7 +101,7 @@ class ThumbnailHandler:
             print(f"Lỗi luồng Thumbnail ngầm: {e}")
             
         finally:
-            if rebuild_when_done and project_id in self.ui.main_app.projects:
+            if rebuild_when_done and changed and project_id in self.ui.main_app.projects:
                 self.ui.main_app.root.after(
                     0,
                     lambda: self.ui._build_video_rows(
