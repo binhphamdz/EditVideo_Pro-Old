@@ -28,6 +28,9 @@ wheels/
 # ================ DATA & WORKSPACE ================
 # Workspace_Data chứa projects, voices, videos
 Workspace_Data/
+*.db
+*.sqlite
+*.sqlite3
 
 # ================ BROWSER PROFILE ================
 Browser_Profile/

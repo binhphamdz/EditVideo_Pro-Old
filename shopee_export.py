@@ -70,7 +70,7 @@ def _build_caption(product_name):
     if not short_name: return CAPTION_HASHTAGS
     return f"{short_name} {CAPTION_HASHTAGS}"
 
-def _load_project_product_info(proj_dir):
+def _load_project_product_info(proj_dir, require_any_link=True):
     # DB-only: lấy thông tin dự án qua project_pid (tên thư mục), sau đó đọc bảng projects.
     project_pid = os.path.basename(os.path.normpath(proj_dir))
 
@@ -103,7 +103,7 @@ def _load_project_product_info(proj_dir):
 
     tiktok_link = normalize_tiktok_product_link(row["tiktok_link"] or "")
     out_of_stock = bool(row["shopee_out_of_stock"])
-    if out_of_stock and not tiktok_link:
+    if require_any_link and out_of_stock and not tiktok_link:
         return {"out_of_stock": True, "product_name": "", "caption": "", "links": [""] * 6, "tiktok_link": ""}
 
     product_name = str(row["product_name"] or "").strip() or str(proj_name or "").strip()
@@ -119,11 +119,11 @@ def _load_project_product_info(proj_dir):
     if len(links) < 6:
         links.extend([""] * (6 - len(links)))
 
-    if not any(links) and not tiktok_link:
+    if require_any_link and not any(links) and not tiktok_link:
         return None
 
     return {
-        "out_of_stock": False,
+        "out_of_stock": out_of_stock,
         "project_id": row["id"],
         "project_name": proj_name,
         "product_name": product_name,
@@ -162,6 +162,8 @@ def export_rendered_video_to_shopee_files(proj_dir, out_file, config=None, defau
     if not product_info or product_info.get("out_of_stock"): return False, ""
 
     valid_links = [normalize_shopee_product_link(l) for l in product_info["links"] if str(l).strip()]
+    if not valid_links:
+        return False, ""
     final_link_cell = "\n".join(valid_links)
     video_name = os.path.basename(out_file)
     db_proj_id = product_info.get("project_id")
@@ -188,11 +190,43 @@ def export_rendered_video_to_shopee_files(proj_dir, out_file, config=None, defau
     
     return True, "database"
 
+def export_rendered_video_to_tiktok_jobs(proj_dir, out_file, config=None, default_status="Chưa đăng"):
+    product_info = _load_project_product_info(proj_dir, require_any_link=False)
+    if not product_info:
+        return False, ""
+
+    video_name = os.path.basename(out_file)
+    db_proj_id = product_info.get("project_id")
+    unique_video_name = f"{db_proj_id}_{video_name}" if db_proj_id else video_name
+    caption = str(product_info.get("project_name") or product_info.get("caption") or product_info.get("product_name") or "").strip()
+
+    with database.db_lock:
+        conn = database.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            INSERT INTO tiktok_jobs (project_id, video_name, product_name, tiktok_link, caption, status)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(video_name) DO UPDATE SET
+                project_id = excluded.project_id,
+                product_name = excluded.product_name,
+                tiktok_link = excluded.tiktok_link,
+                caption = excluded.caption,
+                status = excluded.status,
+                updated_at = CURRENT_TIMESTAMP
+            ''',
+            (db_proj_id, unique_video_name, product_info["product_name"], product_info.get("tiktok_link", "") or "", caption, default_status),
+        )
+        conn.commit()
+        conn.close()
+
+    return True, "database"
+
 def upsert_manual_tiktok_job(file_path, project_name, tiktok_link, profile_name=None, default_status="Sẵn sàng đăng"):
     file_path = os.path.normpath(str(file_path or "").strip())
     project_name = str(project_name or "").strip()
     tiktok_link = normalize_tiktok_product_link(tiktok_link)
-    if not file_path or not project_name or not tiktok_link:
+    if not file_path or not project_name:
         return None
 
     with database.db_lock:
@@ -216,8 +250,8 @@ def upsert_manual_tiktok_job(file_path, project_name, tiktok_link, profile_name=
 
             cursor.execute(
                 """
-                INSERT INTO shopee_jobs (project_id, video_name, product_name, links, tiktok_link, caption, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO tiktok_jobs (project_id, video_name, product_name, tiktok_link, caption, status)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(video_name) DO UPDATE SET
                     project_id = excluded.project_id,
                     product_name = excluded.product_name,
@@ -226,7 +260,7 @@ def upsert_manual_tiktok_job(file_path, project_name, tiktok_link, profile_name=
                     status = excluded.status,
                     updated_at = CURRENT_TIMESTAMP
                 """,
-                (project_id, unique_video_name, product_name, "", tiktok_link, caption, default_status),
+                (project_id, unique_video_name, product_name, tiktok_link, caption, default_status),
             )
             cursor.execute(
                 "UPDATE rendered_videos SET tiktok_link = ? WHERE file_path = ?",
@@ -277,6 +311,43 @@ def load_shopee_jobs(csv_path=None, config=None, profile_name=None):
             "tiktok_link": r['effective_tiktok_link'] if 'effective_tiktok_link' in r.keys() else (r['tiktok_link'] if 'tiktok_link' in r.keys() else ""),
             "caption": r['caption'],
             "status": r['status']
+        })
+    return jobs
+
+def load_tiktok_jobs(config=None, profile_name=None):
+    project_ids = _get_profile_project_ids(profile_name)
+    if not project_ids:
+        return []
+
+    with database.db_lock:
+        conn = database.get_connection()
+        cursor = conn.cursor()
+        placeholders = ",".join(["?"] * len(project_ids))
+        cursor.execute(
+            f"""
+            SELECT tj.*, p.name AS project_name,
+                   COALESCE(tj.tiktok_link, '') AS effective_tiktok_link
+            FROM tiktok_jobs tj
+            LEFT JOIN projects p ON p.id = tj.project_id
+            WHERE tj.project_id IN ({placeholders})
+            ORDER BY tj.id ASC
+            """,
+            project_ids,
+        )
+        rows = cursor.fetchall()
+        conn.close()
+
+    jobs = []
+    for r in rows:
+        jobs.append({
+            "stt": r["id"],
+            "project_name": r["project_name"] if "project_name" in r.keys() else "",
+            "video_name": r["video_name"],
+            "product_name": r["product_name"],
+            "link": "",
+            "tiktok_link": r["effective_tiktok_link"] if "effective_tiktok_link" in r.keys() else (r["tiktok_link"] if "tiktok_link" in r.keys() else ""),
+            "caption": r["caption"],
+            "status": r["status"],
         })
     return jobs
 
@@ -346,6 +417,30 @@ def update_shopee_status(video_name, new_status, csv_path=None, config=None, pro
                 [new_status, f"%_{video_name}"] + project_ids,
             )
         
+        updated = cursor.rowcount > 0
+        conn.commit()
+        conn.close()
+    return updated
+
+def update_tiktok_status(video_name, new_status, config=None, profile_name=None):
+    project_ids = _get_profile_project_ids(profile_name)
+    if not project_ids:
+        return False
+
+    with database.db_lock:
+        conn = database.get_connection()
+        cursor = conn.cursor()
+        proj_placeholders = ",".join(["?"] * len(project_ids))
+        if "_" in video_name and video_name[0].isdigit():
+            cursor.execute(
+                f"UPDATE tiktok_jobs SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE video_name = ? AND project_id IN ({proj_placeholders})",
+                [new_status, video_name] + project_ids,
+            )
+        else:
+            cursor.execute(
+                f"UPDATE tiktok_jobs SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE video_name LIKE ? AND project_id IN ({proj_placeholders})",
+                [new_status, f"%_{video_name}"] + project_ids,
+            )
         updated = cursor.rowcount > 0
         conn.commit()
         conn.close()

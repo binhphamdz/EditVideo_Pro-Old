@@ -16,13 +16,12 @@ from tkinter import filedialog, messagebox, ttk
 
 from paths import BASE_PATH
 from shopee_export import (
-    claim_next_shopee_job,
     get_video_output_dir,
-    load_shopee_jobs,
+    load_tiktok_jobs,
     normalize_shopee_product_link,
     normalize_tiktok_product_link,
     resolve_shopee_video_path,
-    update_shopee_status,
+    update_tiktok_status,
 )
 
 
@@ -58,6 +57,8 @@ class WebAutoPostTab:
         self.log_path = os.path.join(BASE_PATH, "logs", "tab13_web_auto_post.log")
         self.last_post_product_key = ""
         self.scheduler_started = False
+        self.extension_watchdog_started = False
+        self.last_extension_wake_ts = 0
         self.last_schedule_run_key = ""
         self.auto_schedule_lock = threading.Lock()
         self.auto_schedule_slots = list(self.main_app.config.get("web_auto_schedule_slots", []) or [])
@@ -74,10 +75,12 @@ class WebAutoPostTab:
         self.var_upload_wait = tk.IntVar(value=int(self.main_app.config.get("web_auto_upload_wait", 25)))
         self.var_action_timeout = tk.IntVar(value=int(self.main_app.config.get("web_auto_action_timeout", 25)))
         self.var_extension_receiver = tk.StringVar(value=str(self.main_app.config.get("web_auto_extension_receiver", "Tự chọn")))
+        self.var_keep_extension_alive = tk.BooleanVar(value=bool(self.main_app.config.get("web_auto_keep_extension_alive", True)))
 
         self.setup_ui()
         self._ensure_extension_server()
         self._ensure_scheduler()
+        self._ensure_extension_watchdog()
         self.refresh_jobs_preview()
 
     def setup_ui(self):
@@ -144,6 +147,14 @@ class WebAutoPostTab:
             font=("Arial", 10),
             command=self._save_settings,
         ).pack(side="left")
+        tk.Checkbutton(
+            row_flags,
+            text="Giữ extension online",
+            variable=self.var_keep_extension_alive,
+            bg="#ffffff",
+            font=("Arial", 10),
+            command=self._save_settings,
+        ).pack(side="left", padx=(16, 0))
 
         self._build_spin_row(settings, "Chờ upload sau đăng (s):", self.var_upload_wait, 5, 240)
         self._build_spin_row(settings, "Timeout thao tác (s):", self.var_action_timeout, 10, 90)
@@ -163,6 +174,8 @@ class WebAutoPostTab:
         tk.Entry(schedule_row, textvariable=self.var_schedule_time, width=7, font=("Arial", 10), justify="center").pack(side="left", padx=(6, 12))
         tk.Label(schedule_row, text="Số video/lần:", bg="#ffffff", font=("Arial", 10)).pack(side="left")
         tk.Spinbox(schedule_row, textvariable=self.var_schedule_batch_count, from_=1, to=100, width=6, font=("Arial", 10)).pack(side="left", padx=(6, 0))
+        tk.Button(schedule_row, text="➕ Thêm lịch tay", bg="#8e44ad", fg="white", font=("Arial", 9, "bold"), command=self.add_manual_schedule_slot).pack(side="left", padx=(8, 0))
+        tk.Button(schedule_row, text="🧹 Xóa lịch chờ", bg="#95a5a6", fg="white", font=("Arial", 9, "bold"), command=self.clear_pending_schedule_slots).pack(side="left", padx=(6, 0))
         tk.Label(
             schedule,
             text="Đến giờ, Tab 13 tự lấy job theo thứ tự trộn và đăng lần lượt đủ số lượng đã đặt.",
@@ -172,12 +185,17 @@ class WebAutoPostTab:
             font=("Arial", 9),
         ).pack(fill="x", pady=(4, 0))
 
+        self.lst_schedule_slots = tk.Listbox(schedule, height=4, font=("Arial", 9), bg="#f8f9fa")
+        self.lst_schedule_slots.pack(fill="x", pady=(6, 0))
+        self.refresh_schedule_slots_view()
+
         ext_row = tk.Frame(settings, bg="#ffffff")
         ext_row.pack(fill="x", pady=3)
         tk.Label(ext_row, text="Chrome Extension:", bg="#ffffff", font=("Arial", 10), width=18, anchor="w").pack(side="left")
         self.cmb_extension_receiver = ttk.Combobox(ext_row, textvariable=self.var_extension_receiver, values=["Tự chọn"], state="readonly", font=("Arial", 10))
         self.cmb_extension_receiver.pack(side="left", fill="x", expand=True, padx=(0, 6))
         tk.Button(ext_row, text="↻", width=4, command=self.refresh_extension_clients).pack(side="left")
+        tk.Button(ext_row, text="🔌 Kiểm tra/Kích", bg="#1f4e79", fg="white", font=("Arial", 9, "bold"), command=self.check_extension_connection).pack(side="left", padx=(6, 0))
 
         guide = tk.LabelFrame(left_panel, text=" 🧠 Luồng tab 13 ", bg="#ffffff", font=("Arial", 11, "bold"), padx=15, pady=10)
         guide.pack(fill="both", expand=True)
@@ -239,7 +257,7 @@ class WebAutoPostTab:
         self.txt_log.pack(fill="x")
         self.txt_log.config(state="disabled")
 
-        for variable in [self.var_attach_product_link, self.var_schedule_enabled, self.var_schedule_time, self.var_schedule_batch_count, self.var_upload_wait, self.var_action_timeout, self.var_extension_receiver]:
+        for variable in [self.var_attach_product_link, self.var_keep_extension_alive, self.var_schedule_enabled, self.var_schedule_time, self.var_schedule_batch_count, self.var_upload_wait, self.var_action_timeout, self.var_extension_receiver]:
             variable.trace_add("write", lambda *args: self._save_settings())
 
     def _build_path_row(self, parent, label, var):
@@ -269,6 +287,7 @@ class WebAutoPostTab:
             self.main_app.config["web_auto_headless"] = bool(self.var_headless.get())
             self.main_app.config["web_auto_debug_port"] = int(self.var_debug_port.get())
             self.main_app.config["web_auto_attach_product_link"] = bool(self.var_attach_product_link.get())
+            self.main_app.config["web_auto_keep_extension_alive"] = bool(self.var_keep_extension_alive.get())
             self.main_app.config["web_auto_schedule_enabled"] = bool(self.var_schedule_enabled.get())
             self.main_app.config["web_auto_schedule_time"] = self.var_schedule_time.get().strip() or "09:00"
             self.main_app.config["web_auto_schedule_batch_count"] = max(1, int(self.var_schedule_batch_count.get()))
@@ -280,13 +299,46 @@ class WebAutoPostTab:
             pass
 
     def refresh_extension_clients(self):
-        with self.extension_lock:
-            receivers = sorted({info.get("receiver", "") for info in self.extension_client_info.values() if info.get("app_id") == self.EXTENSION_APP_ID and info.get("receiver")})
+        receivers = self._get_live_extension_receivers()
         values = ["Tự chọn"] + receivers
         if hasattr(self, "cmb_extension_receiver") and self.cmb_extension_receiver.winfo_exists():
             self.cmb_extension_receiver["values"] = values
             if self.var_extension_receiver.get() not in values:
                 self.var_extension_receiver.set("Tự chọn")
+
+        if receivers:
+            self.set_status(f"✅ Extension online: {', '.join(receivers)}", "#27ae60")
+        else:
+            self.set_status("⚠️ Chưa thấy Chrome extension online. Bấm Kiểm tra/Kích hoặc mở Chrome gắn extension.", "#e67e22")
+
+    def _get_live_extension_receivers(self, max_age_seconds=25):
+        now = time.time()
+        stale_clients = []
+        receivers = set()
+        with self.extension_lock:
+            for client, info in list(self.extension_client_info.items()):
+                if info.get("app_id") != self.EXTENSION_APP_ID:
+                    continue
+                last_seen = float(info.get("last_seen") or 0)
+                if last_seen and now - last_seen > max_age_seconds:
+                    stale_clients.append(client)
+                    continue
+                receiver = str(info.get("receiver") or "").strip()
+                if receiver:
+                    receivers.add(receiver)
+
+            for client in stale_clients:
+                if client in self.extension_clients:
+                    self.extension_clients.remove(client)
+                self.extension_client_info.pop(client, None)
+
+        for client in stale_clients:
+            try:
+                client.close()
+            except Exception:
+                pass
+
+        return sorted(receivers)
 
     def set_status(self, text, color="#337ab7"):
         if self.status_label.winfo_exists():
@@ -337,6 +389,7 @@ class WebAutoPostTab:
     def on_tab_activated(self):
         self._ensure_extension_server()
         self._ensure_scheduler()
+        self._ensure_extension_watchdog()
         self.refresh_extension_clients()
         self.refresh_jobs_preview()
 
@@ -345,6 +398,38 @@ class WebAutoPostTab:
             return
         self.scheduler_started = True
         threading.Thread(target=self._run_schedule_watcher, daemon=True).start()
+
+    def _ensure_extension_watchdog(self):
+        if self.extension_watchdog_started:
+            return
+        self.extension_watchdog_started = True
+        threading.Thread(target=self._run_extension_watchdog, daemon=True).start()
+
+    def _should_keep_extension_alive(self):
+        return bool(self.main_app.config.get("web_auto_keep_extension_alive", True))
+
+    def _run_extension_watchdog(self):
+        while True:
+            try:
+                if self._should_keep_extension_alive():
+                    self._ensure_extension_server()
+                    receivers = self._get_live_extension_receivers()
+                    if not receivers and time.time() - self.last_extension_wake_ts >= 300:
+                        self.last_extension_wake_ts = time.time()
+                        self.add_log("Watchdog: chưa thấy extension online, tự mở Chrome để giữ kết nối.")
+                        try:
+                            self._open_extension_chrome(show_error=False)
+                        except Exception as exc:
+                            self.add_log(f"Watchdog không mở được Chrome: {exc}")
+                    elif receivers:
+                        self.last_extension_wake_ts = 0
+                time.sleep(45)
+            except Exception as exc:
+                try:
+                    self.add_log(f"Lỗi watchdog extension: {exc}")
+                except Exception:
+                    pass
+                time.sleep(60)
 
     def _parse_schedule_time(self):
         raw = self.var_schedule_time.get().strip()
@@ -393,6 +478,105 @@ class WebAutoPostTab:
             self.main_app.save_config()
         except Exception:
             pass
+
+        try:
+            self.parent.after(0, self.refresh_schedule_slots_view)
+        except Exception:
+            pass
+
+    def refresh_schedule_slots_view(self):
+        if not hasattr(self, "lst_schedule_slots") or not self.lst_schedule_slots.winfo_exists():
+            return
+
+        self.lst_schedule_slots.delete(0, "end")
+        with self.auto_schedule_lock:
+            slots = sorted(list(self.auto_schedule_slots), key=lambda item: str(item.get("run_at", "")))
+
+        pending_or_running = [slot for slot in slots if str(slot.get("status", "pending")) in ("pending", "running")]
+        if not pending_or_running:
+            self.lst_schedule_slots.insert("end", "Chưa có lịch chờ. Bot có thể tự chia lịch, hoặc bác thêm lịch tay tại đây.")
+            return
+
+        for slot in pending_or_running:
+            source = "BOT" if str(slot.get("source", "")).lower() == "bot" else "TAY"
+            status = str(slot.get("status", "pending"))
+            run_at = str(slot.get("run_at", ""))
+            count = int(slot.get("count") or 1)
+            self.lst_schedule_slots.insert("end", f"{run_at} | {count} video | {source} | {status}")
+
+    def _make_unique_schedule_key(self, run_ts):
+        with self.auto_schedule_lock:
+            used_keys = {str(slot.get("run_at", "")) for slot in self.auto_schedule_slots}
+
+        while True:
+            run_key = time.strftime("%Y-%m-%d %H:%M", time.localtime(run_ts))
+            if run_key not in used_keys:
+                return run_key
+            run_ts += 60
+
+    def add_manual_schedule_slot(self):
+        parsed = self._parse_schedule_time()
+        if not parsed:
+            messagebox.showwarning("Giờ không hợp lệ", "Nhập giờ theo định dạng HH:MM, ví dụ 09:30.")
+            return
+
+        pending_count = len([job for job in self._load_arranged_jobs() if self._is_pending_job(job)])
+        if pending_count <= 0:
+            messagebox.showwarning("Không có job", "Tab 13 chưa có video nào đang chờ đăng.")
+            return
+
+        try:
+            count = max(1, int(self.var_schedule_batch_count.get()))
+        except Exception:
+            count = 1
+        count = min(count, pending_count)
+
+        hour, minute = parsed
+        now = time.localtime()
+        run_ts = time.mktime((now.tm_year, now.tm_mon, now.tm_mday, hour, minute, 0, now.tm_wday, now.tm_yday, now.tm_isdst))
+        if run_ts <= time.time():
+            run_ts += 24 * 60 * 60
+
+        slot = {
+            "run_at": self._make_unique_schedule_key(run_ts),
+            "count": count,
+            "status": "pending",
+            "source": "manual",
+        }
+        with self.auto_schedule_lock:
+            self.auto_schedule_slots.append(slot)
+            self.auto_schedule_slots.sort(key=lambda item: str(item.get("run_at", "")))
+
+        self._save_auto_schedule_slots()
+        self.add_log(f"Đã thêm lịch tay {slot['run_at']}: đăng {count} video.")
+        self.set_status(f"⏰ Đã thêm lịch tay {slot['run_at'][-5:]} ({count} video)", "#8e44ad")
+
+    def clear_pending_schedule_slots(self):
+        with self.auto_schedule_lock:
+            before = len(self.auto_schedule_slots)
+            self.auto_schedule_slots = [
+                slot for slot in self.auto_schedule_slots
+                if str(slot.get("status", "pending")) != "pending"
+            ]
+            removed = before - len(self.auto_schedule_slots)
+
+        self._save_auto_schedule_slots()
+        self.add_log(f"Đã xóa {removed} lịch đang chờ.")
+        self.set_status(f"🧹 Đã xóa {removed} lịch chờ", "#636e72")
+
+    def _replace_pending_schedule_slots_for_source(self, source, new_slots):
+        source_key = str(source or "").lower()
+        with self.auto_schedule_lock:
+            preserved = [
+                slot for slot in self.auto_schedule_slots
+                if not (
+                    str(slot.get("source", "")).lower() == source_key
+                    and str(slot.get("status", "pending")) == "pending"
+                )
+            ]
+            self.auto_schedule_slots = preserved + list(new_slots)
+            self.auto_schedule_slots.sort(key=lambda item: str(item.get("run_at", "")))
+        self._save_auto_schedule_slots()
 
     def _start_due_auto_schedule_slot(self):
         now_key = time.strftime("%Y-%m-%d %H:%M", time.localtime())
@@ -457,11 +641,9 @@ class WebAutoPostTab:
             used_keys.add(run_key)
             slots.append({"run_at": run_key, "count": count, "status": "pending", "source": source})
 
-        with self.auto_schedule_lock:
-            self.auto_schedule_slots = slots
+        self._replace_pending_schedule_slots_for_source(source, slots)
         self.var_schedule_batch_count.set(1)
         self._save_settings()
-        self._save_auto_schedule_slots()
         self.refresh_jobs_preview()
         first_text = slots[0]["run_at"][-5:]
         last_text = slots[-1]["run_at"][-5:]
@@ -514,9 +696,15 @@ class WebAutoPostTab:
         return ""
 
     def open_manual_login(self):
+        self._open_extension_chrome(show_error=True)
+
+    def _open_extension_chrome(self, show_error=False):
         chrome = self._detect_chrome_path()
         if not chrome:
-            return messagebox.showerror("Thiếu Chrome", "Không tìm thấy chrome.exe trên máy.")
+            if show_error:
+                messagebox.showerror("Thiếu Chrome", "Không tìm thấy chrome.exe trên máy.")
+                return False
+            raise RuntimeError("Không tìm thấy chrome.exe trên máy.")
 
         user_data = self.var_user_data_dir.get().strip()
         profile_dir = self.var_profile_dir.get().strip() or "Default"
@@ -532,7 +720,69 @@ class WebAutoPostTab:
         ]
         self.add_log(f"Mở Chrome gắn extension: profile={profile_dir}, debug_port={debug_port}, user_data={user_data}")
         subprocess.Popen(args)
-        self.set_status("🔐 Đã mở Chrome gắn extension. Nếu Chrome đã mở sẵn, hãy đóng rồi bấm lại để bật debug port.", "#8e44ad")
+        self.parent.after(0, lambda: self.set_status("🔐 Đã mở Chrome gắn extension. Nếu Chrome đã mở sẵn, hãy đóng rồi bấm lại để bật debug port.", "#8e44ad"))
+        return True
+
+    def check_extension_connection(self):
+        self._ensure_extension_server()
+        self.refresh_extension_clients()
+        receivers = self._get_live_extension_receivers()
+        if receivers:
+            messagebox.showinfo("Extension online", "Đã thấy extension online:\n" + "\n".join(receivers))
+            return
+
+        if not messagebox.askyesno(
+            "Chưa thấy extension",
+            "Chưa thấy Chrome extension online. Mở Chrome gắn extension/upload page để kích lại kết nối không?",
+        ):
+            return
+
+        def worker():
+            try:
+                self._open_extension_chrome(show_error=False)
+                receivers = self._wait_for_extension_client(timeout_s=25)
+                if receivers:
+                    self.parent.after(0, lambda rs=receivers: messagebox.showinfo("Extension online", "Đã kết nối:\n" + "\n".join(rs)))
+                else:
+                    self.parent.after(0, lambda: messagebox.showwarning("Chưa online", "Đã mở Chrome nhưng extension chưa kết nối. Kiểm tra extension đã bật và reload extension trong chrome://extensions."))
+            except Exception as exc:
+                self.parent.after(0, lambda e=str(exc): messagebox.showwarning("Không kích được extension", e))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _wait_for_extension_client(self, timeout_s=20):
+        deadline = time.time() + max(1, int(timeout_s))
+        while time.time() < deadline:
+            receivers = self._get_live_extension_receivers()
+            if receivers:
+                self.parent.after(0, self.refresh_extension_clients)
+                return receivers
+            time.sleep(1)
+        self.parent.after(0, self.refresh_extension_clients)
+        return []
+
+    def _ensure_extension_online_or_raise(self, timeout_s=20):
+        self._ensure_extension_server()
+        receivers = self._get_live_extension_receivers()
+        target_receiver = self._get_selected_extension_receiver()
+        if target_receiver and target_receiver in receivers:
+            return target_receiver
+        if not target_receiver and receivers:
+            return receivers[0]
+
+        self.add_log("Chưa thấy extension online, tự mở Chrome gắn extension để kích lại kết nối...")
+        self._open_extension_chrome(show_error=False)
+        receivers = self._wait_for_extension_client(timeout_s=timeout_s)
+        target_receiver = self._get_selected_extension_receiver()
+        if target_receiver and target_receiver in receivers:
+            return target_receiver
+        if not target_receiver and receivers:
+            return receivers[0]
+
+        raise RuntimeError(
+            "Chrome extension chưa online. Hãy kiểm tra: extension EditVideo Pro đã bật trong chrome://extensions, "
+            "Chrome đang dùng đúng profile, rồi bấm 'Kiểm tra/Kích' ở Tab 13."
+        )
 
     def _product_key(self, job):
         text = str(job.get("product_name") or job.get("project_name") or job.get("caption") or "").lower()
@@ -573,7 +823,7 @@ class WebAutoPostTab:
         return str(job.get("status", "")).strip() in self.PENDING_STATUSES
 
     def _load_arranged_jobs(self):
-        jobs = load_shopee_jobs(profile_name=self.main_app.get_active_profile_name())
+        jobs = load_tiktok_jobs(profile_name=self.main_app.get_active_profile_name())
         pending = [job for job in jobs if self._is_pending_job(job)]
         others = [job for job in jobs if not self._is_pending_job(job)]
         return self._arrange_jobs_mixed(pending) + others
@@ -645,7 +895,7 @@ class WebAutoPostTab:
         if len(values) < 2:
             return
         video_name = str(values[1] or "").strip()
-        jobs = load_shopee_jobs(profile_name=self.main_app.get_active_profile_name())
+        jobs = load_tiktok_jobs(profile_name=self.main_app.get_active_profile_name())
         job = next((item for item in jobs if str(item.get("video_name", "")) == video_name), None)
         if not job:
             messagebox.showwarning("Không thấy job", "Không tìm thấy job này trong database.")
@@ -914,21 +1164,14 @@ class WebAutoPostTab:
         value = self.var_extension_receiver.get().strip()
         if value and value != "Tự chọn":
             return value
-        with self.extension_lock:
-            receivers = sorted({info.get("receiver", "") for info in self.extension_client_info.values() if info.get("app_id") == self.EXTENSION_APP_ID and info.get("receiver")})
+        receivers = self._get_live_extension_receivers()
         return receivers[0] if receivers else ""
 
     def _has_extension_client(self, target_receiver=""):
-        with self.extension_lock:
-            for client in self.extension_clients:
-                info = self.extension_client_info.get(client, {})
-                if info.get("app_id") != self.EXTENSION_APP_ID:
-                    continue
-                receiver = info.get("receiver", "")
-                if target_receiver and receiver != target_receiver:
-                    continue
-                return True
-        return False
+        receivers = self._get_live_extension_receivers()
+        if target_receiver:
+            return target_receiver in receivers
+        return bool(receivers)
 
     def _send_product_link_to_extension(self, product_link, timeout_s):
         self._ensure_extension_server()
@@ -1047,7 +1290,7 @@ class WebAutoPostTab:
                 self.extension_requests.pop(request_id, None)
 
     def _set_job_status(self, video_name, status):
-        update_shopee_status(video_name, status, profile_name=self.main_app.get_active_profile_name())
+        update_tiktok_status(video_name, status, profile_name=self.main_app.get_active_profile_name())
         self.parent.after(0, self.refresh_jobs_preview)
 
     def _notify_telegram_post_done(self, video_name, caption_text="", product_link="", attached=False):
@@ -1219,6 +1462,7 @@ class WebAutoPostTab:
         return True
 
     def _post_single_job(self, video_path, caption_text, product_link):
+        self._ensure_extension_online_or_raise(timeout_s=25)
         product_link = normalize_tiktok_product_link(product_link)
         attach_product_link = bool(self.var_attach_product_link.get()) and bool(product_link)
         if attach_product_link:

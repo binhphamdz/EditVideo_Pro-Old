@@ -8,7 +8,6 @@ import threading # [MỚI] IMPORT THƯ VIỆN KHÓA
 import time
 from datetime import datetime
 from PIL import Image, ImageDraw, ImageFont
-from shopee_export import export_rendered_video_to_shopee_files, is_shopee_out_of_stock_project
 from paths import BASE_PATH, resource_path
 
 # =======================================================
@@ -696,11 +695,6 @@ def render_faceless_video(voice_name, voice_path, timeline, proj_dir, proj_name,
             if os.path.exists(f_path):
                 try: os.remove(f_path)
                 except: pass
-        shopee_out_of_stock = is_shopee_out_of_stock_project(proj_dir)
-        from shopee_export import export_rendered_video_to_shopee_files
-        exported_to_shopee, _ = export_rendered_video_to_shopee_files(proj_dir, out_file, config=config, default_status="Chưa đăng")
-        if shopee_out_of_stock: log_cb(f"[{voice_name}] ⏭️ Shopee Hết hàng, bỏ qua lưu Job.")
-        elif exported_to_shopee: log_cb(f"[{voice_name}] ✅ Đã lưu Job Shopee thành công!")
         return list(global_used_vids)
 
     extract_points = []
@@ -793,13 +787,6 @@ def render_faceless_video(voice_name, voice_path, timeline, proj_dir, proj_name,
             try: os.remove(f_path)
             except: pass
 
-    shopee_out_of_stock = is_shopee_out_of_stock_project(proj_dir)
-    from shopee_export import export_rendered_video_to_shopee_files
-    exported_to_shopee, _ = export_rendered_video_to_shopee_files(proj_dir, out_file, config=config, default_status="Chưa đăng")
-    
-    if shopee_out_of_stock: log_cb(f"[{voice_name}] ⏭️ Shopee Hết hàng, bỏ qua lưu Job.")
-    elif exported_to_shopee: log_cb(f"[{voice_name}] ✅ Đã lưu Job Shopee thành công!")
-        
     return list(global_used_vids)
 
 

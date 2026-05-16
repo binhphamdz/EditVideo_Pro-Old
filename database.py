@@ -200,6 +200,21 @@ def init_db():
         )
     ''')
 
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS tiktok_jobs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER,
+            video_name TEXT UNIQUE,
+            product_name TEXT,
+            tiktok_link TEXT,
+            caption TEXT,
+            status TEXT DEFAULT 'Chưa đăng',
+            device_id TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (project_id) REFERENCES projects (id) ON DELETE CASCADE
+        )
+    ''')
+
     # 5. Bảng Rendered Videos (Thành phẩm - Thay thế file CSV cũ)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS rendered_videos (

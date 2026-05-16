@@ -483,6 +483,7 @@ class FacelessTab:
 
     def _run_multithread_batch(self, voices, proj_dir, proj_name, bot=None, chat_id=None):
         self.completed_count = 0
+        rendered_paths = []
         batch_config = dict(self.main_app.config)
         batch_config["enable_cover"] = self._get_profile_cover_enabled()
         try:
@@ -493,8 +494,12 @@ class FacelessTab:
             # Truyền thêm tham số thời gian delay để chống kẹt
             futures = [executor.submit(self._process_single, v, proj_dir, proj_name, batch_config) for v in voices]
             for future in concurrent.futures.as_completed(futures):
-                try: future.result()
-                except Exception as exc: self.add_log(f"❌ LUỒNG CRASH: {exc}")
+                try:
+                    output_path = future.result()
+                    if output_path:
+                        rendered_paths.append(output_path)
+                except Exception as exc:
+                    self.add_log(f"❌ LUỒNG CRASH: {exc}")
         
         try:
             self.add_log("🧹 Đang dọn dẹp bộ nhớ FFmpeg ngầm...")
@@ -504,17 +509,68 @@ class FacelessTab:
         
         self.add_log("=========================================")
         self.add_log(f"🎉 HOÀN TẤT! Thành công: {self.completed_count}/{len(voices)}.")
-        self.main_app.root.after(0, lambda: self.btn_run_batch.config(state="normal", text="🚀 BẤM RENDER (ĐA LUỒNG)"))
         if bot and chat_id: bot.send_message(chat_id, f"🎉 Đã xuất xưởng {self.completed_count}/{len(voices)} video. Nhắn /icloud để nhận hàng!")
-        
-        try: self.main_app.tab4.load_excel_data()
-        except: pass
+
+        self.main_app.root.after(
+            0,
+            lambda paths=list(rendered_paths), total=len(voices): self._on_render_batch_finished(paths, total),
+        )
+
+    def _reset_render_ui_state(self):
+        if hasattr(self, "btn_run_batch") and self.btn_run_batch.winfo_exists():
+            self.btn_run_batch.config(state="normal", text="🚀 BẤM RENDER (ĐA LUỒNG)")
+
+        for attr_name in ("progress_bar", "progress"):
+            widget = getattr(self, attr_name, None)
+            if widget is not None:
+                try:
+                    widget["value"] = 0
+                except Exception:
+                    pass
+
+    def _on_render_batch_finished(self, rendered_paths, total_count):
+        """Runs on Tk main thread after worker render finishes."""
+        self._reset_render_ui_state()
 
         try:
-            if self.completed_count > 0 and hasattr(self.main_app, "tab13"):
-                self.main_app.root.after(0, lambda: self.main_app.tab13.schedule_all_pending_after_render("tab2"))
+            if hasattr(self.main_app, "tab4"):
+                self.main_app.tab4.load_excel_data()
         except Exception as e:
-            self.add_log(f"⚠️ Không tự lên lịch Tab 13 sau render được: {e}")
+            self.add_log(f"⚠️ Không refresh được Tab 4 sau render: {e}")
+
+        if self.completed_count <= 0:
+            return
+
+        if rendered_paths:
+            self.last_rendered_output_paths = list(rendered_paths)
+            self.add_log(f"✅ Đã nhận {len(rendered_paths)}/{total_count} đường dẫn video thành phẩm để chuyển sang Tab Đăng bài.")
+
+        try:
+            if hasattr(self.main_app, "tab11"):
+                self.main_app.tab11.last_rendered_output_paths = list(rendered_paths)
+                self.main_app.tab11.on_tab_activated()
+        except Exception as e:
+            self.add_log(f"⚠️ Không khởi tạo/refresh được Tab 11 sau render: {e}")
+
+        try:
+            if hasattr(self.main_app, "tab13"):
+                self.main_app.tab13.last_rendered_output_paths = list(rendered_paths)
+                self.main_app.tab13.schedule_all_pending_after_render("tab2")
+        except Exception as e:
+            self.add_log(f"⚠️ Không tự lên lịch/refresh Tab 13 sau render được: {e}")
+
+        try:
+            target_frame = None
+            if hasattr(self.main_app, "frame_tab13"):
+                target_frame = self.main_app.frame_tab13
+            elif hasattr(self.main_app, "frame_tab11"):
+                target_frame = self.main_app.frame_tab11
+
+            if target_frame is not None and hasattr(self.main_app, "notebook"):
+                self.main_app.notebook.select(target_frame)
+                self.add_log("➡️ Đã tự động chuyển sang Tab Đăng bài sau khi render xong.")
+        except Exception as e:
+            self.add_log(f"⚠️ Không chuyển được sang Tab Đăng bài sau render: {e}")
 
     def _process_single(self, voice_name, proj_dir, proj_name, config=None):
         import database
@@ -615,7 +671,7 @@ class FacelessTab:
             # =======================================================
             # 5. RENDER VIDEO & GHI JOB SHOPEE (DATABASE)
             # =======================================================
-            from shopee_export import export_rendered_video_to_shopee_files, is_shopee_out_of_stock_project
+            from shopee_export import export_rendered_video_to_shopee_files, export_rendered_video_to_tiktok_jobs, is_shopee_out_of_stock_project
             
             # Hàm render giờ đây sẽ trả về danh sách chính xác các file Broll nó đã dùng
             if is_video_voice:
@@ -640,6 +696,12 @@ class FacelessTab:
                 exported_to_shopee, _ = export_rendered_video_to_shopee_files(proj_dir, out_file, config=config, default_status="Chưa đăng")
                 if exported_to_shopee:
                     self.add_log(f"[{voice_name}] ✅ Đã lưu Job đăng Shopee vào Database.")
+                else:
+                    self.add_log(f"[{voice_name}] ⏭️ Không có Link Shopee, bỏ qua queue Shopee.")
+
+            exported_to_tiktok, _ = export_rendered_video_to_tiktok_jobs(proj_dir, out_file, config=config, default_status="Chưa đăng")
+            if exported_to_tiktok:
+                self.add_log(f"[{voice_name}] ✅ Đã lưu Job Tab 13 TikTok Web vào Database.")
 
             with self.completed_lock:
                 self.completed_count += 1
@@ -701,8 +763,8 @@ class FacelessTab:
                 except:
                     pass
 
-            return True
+            return out_file
 
         except Exception as e:
             self.add_log(f"❌ LỖI NGHIÊM TRỌNG {voice_name}: {e}")
-            return False
+            return None

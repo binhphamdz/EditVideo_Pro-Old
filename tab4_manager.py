@@ -265,10 +265,6 @@ class ManagerTab:
         if not os.path.exists(video_path):
             messagebox.showwarning("Mất file", "Không thấy file video để đăng.")
             return
-        if not tiktok_link:
-            messagebox.showwarning("Thiếu link", "Bác nhập link sản phẩm TikTok ở cột Link SP TikTok trước đã.")
-            self.edit_tiktok_link_cell(item)
-            return
         if not hasattr(self.main_app, "tab13"):
             messagebox.showwarning("Thiếu tab 13", "Không tìm thấy tab 13 để chạy luồng đăng web.")
             return
